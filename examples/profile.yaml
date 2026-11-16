@@ -1,0 +1,14 @@
+# Copy to data/profile.yaml and replace with your own details.
+name: Alex Jordan Rivera
+location: Los Angeles, CA
+phone: "+1 (555) 010-0123"
+email: alex@example.com
+github: https://github.com/example
+linkedin: https://www.linkedin.com/in/example
+website: https://example.com
+us_citizen: true
+needs_sponsorship: false
+work_modes: [remote, hybrid, onsite]
+open_to_relocate: true
+available_from: immediately
+intern_location: Boston, MA

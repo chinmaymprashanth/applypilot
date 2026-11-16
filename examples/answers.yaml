@@ -1,0 +1,19 @@
+# Copy to data/answers.yaml. Blank values are left for you on the form.
+# Choice answers can list alternatives with " | "; the first one the form offers is picked.
+start_date: immediately
+willing_to_relocate: "Yes"
+referral_source: Company website
+highest_degree: "Bachelor's degree"
+current_company: Example Corp
+current_title: Software Developer
+over_18: "Yes"
+state: California
+pronouns: ""
+noncompete: "No"
+salary_expectation: "Open; the posted range works for me"
+optional_contact: "No | Decline | I do not"
+eeo:
+  gender: ""
+  race: ""
+  veteran: ""
+  disability: ""

@@ -1,0 +1,12 @@
+.env
+browser_profile/
+data/
+output/
+logs/
+~$*.xlsx
+.venv/
+__pycache__/
+.pytest_cache/
+tracker.xlsx
+*.tmp.xlsx
+.DS_Store

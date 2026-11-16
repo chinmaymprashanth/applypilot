@@ -1,0 +1,33 @@
+# Copy to data/master_resume.yaml. This is the ONLY source of facts for resumes, letters and answers.
+# bullets = resume text as written; facts = extra true details the tailor may cite.
+# verified: false keeps an entry out of every application; hide_for lists tracks to leave it off
+# (software, ai_ml, data_support, salesforce); track_facts are used only on that track's resumes.
+experience:
+- company: Example Corp
+  title: Software Developer
+  location: Austin, TX
+  start: 2024-06
+  end: 2025-12
+  bullets:
+  - Built 3 internal APIs in Python and FastAPI used by 200+ employees.
+  facts:
+  - Wrote SQL reports for the finance team.
+projects:
+- name: Example Analytics Dashboard
+  link: https://example.com/demo
+  tech: [Python, Streamlit, SQL]
+  bullets:
+  - Built a dashboard over 100K+ records with interactive charts.
+education:
+- school: Example State University
+  degree: Bachelor of Science in Computer Science
+  location: Austin, TX
+  start: 2020-08
+  end: 2024-05
+  gpa: 3.7/4.0
+skills:
+- category: Programming
+  items: [Python, SQL]
+- category: Frameworks
+  items: [FastAPI, Streamlit, Docker, Git]
+achievements: []

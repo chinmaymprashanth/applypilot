@@ -1,0 +1,15 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>{{ p.name }} Cover Letter</title>
+<style>
+  {{ fonts_css }}
+  @page { size: Letter; margin: 0.9in 1in; }
+  body { font-family: "Source Sans 3", Arial, Helvetica, sans-serif; font-size: 11.5pt; line-height: 1.5; color: #1a1a1a; }
+  a { color: #1a4f9c; }
+  .head { margin-bottom: 22px; }
+  .head b { font-size: 14pt; }
+  p { margin: 0 0 11px 0; }
+</style></head>
+<body>
+<div class="head"><b>{{ p.name }}</b><br>{{ p.location }} | {{ p.phone }} | <a href="mailto:{{ p.email }}">{{ p.email }}</a> | <a href="{{ p.linkedin }}">LinkedIn</a> | <a href="{{ p.github }}">GitHub</a><br>{{ today }}</div>
+{% for para in paragraphs %}<p>{{ para }}</p>{% endfor %}
+</body></html>
