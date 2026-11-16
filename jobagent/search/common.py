@@ -44,7 +44,7 @@ TECH_HINTS = re.compile(
     r"engineer|developer|programmer|\bswe\b|\bsde\b|\bmts\b|technical staff|software|analyst|analytics|"
     r"scientist|\bdata\b|\bai\b|\bml\b|machine learning|\bllm\b|\bbi\b|business intelligence|backend|"
     r"back-end|full[- ]?stack|front[- ]?end|cloud|devops|\bsre\b|platform|python|\bsql\b|automation|"
-    r"salesforce|\bcrm\b",
+    r"salesforce|\bcrm\b|consultant|implementation|\btechnical\b|technology|rotational",
     re.I,
 )
 NOT_TECH = re.compile(

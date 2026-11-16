@@ -227,6 +227,7 @@ def run_funnel(
     now: datetime | None = None, workers: int = 4, limit: int = 200,
     enrich: Callable[[dict, str], dict | None] | None = None, enrich_limit: int = 30,
     screen: ManyAssessor | None = None, assess_many: ManyAssessor | None = None, top_n_intern: int = 0,
+    read_limit: int | None = None,
 ) -> FunnelReport:
     """assess reads one job (also used to re-read enriched jobs). screen and assess_many, when given, read many
     jobs at once (e.g. through the Batch API): screen is the cheap lenient first pass, assess_many the careful one."""
@@ -303,14 +304,22 @@ def run_funnel(
         survivors = []
         for job in to_read:
             a = first.get(job["id"])
+            quick = 0.0
             if isinstance(a, Assessment):
                 v = judge(a, job, fresh_hours, now, min_match=SCREEN_MIN_MATCH, screen=True)
                 if v.stage:
                     report.screened_out += 1
                     drop(job, Verdict(v.stage, f"first screen: {v.reason}"))
                     continue
-            survivors.append(job)  # passed, or the screen failed on it: the careful read decides
-        to_read = survivors
+                quick = v.score or 0.0
+            survivors.append((quick, job))  # passed, or the screen failed on it: the careful read decides
+        # The careful read takes the most promising survivors; the rest are screened again next run.
+        survivors.sort(key=lambda qj: -qj[0])
+        if read_limit and len(survivors) > read_limit:
+            report.errors.append(f"{len(survivors) - read_limit} jobs passed the first screen but wait for tomorrow's "
+                                 f"careful read (max {read_limit} a day, best first)")
+            survivors = survivors[:read_limit]
+        to_read = [job for _, job in survivors]
     # Careful read of everything still in, with the full rules.
     report.second_read = len(to_read)
     answers = read_all(assess_many, to_read)

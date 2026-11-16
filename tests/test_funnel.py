@@ -240,3 +240,29 @@ def test_mid_level_duties_rank_below_entry_level(tmp_path):
                    max_age_days=7, fresh_hours=24, now=NOW, workers=1)
     assert [j["title"] for j in r.shortlisted] == ["Data Analyst", "Associate Analyst"]  # kept, but ranked lower
     assert r.shortlisted[0]["score"] - r.shortlisted[1]["score"] == 20
+
+
+@pytest.mark.parametrize("title", ["Technical Consultant", "Implementation Consultant", "Associate Consultant, Technology",
+                                   "Implementation Specialist", "Solutions Consultant", "Technical Program Associate",
+                                   "Rotational Program - Technology"])
+def test_similar_titles_reach_claude(title):
+    assert looks_tech(title)  # Claude then judges the actual work from the description
+
+
+def test_careful_read_takes_the_best_screen_survivors(tmp_path):
+    t = _tracker(tmp_path, [{"title": f"Software Engineer {i}", "company": f"Co{i}", "desc": f"j{i}"} for i in range(5)])
+    careful = []
+
+    def screen(pairs):
+        return {j["id"]: A(skills_match=50 + 10 * int(d.split()[0][1:])) for j, d in pairs}
+
+    def assess_many(pairs):
+        careful.extend(d.split()[0] for _, d in pairs)
+        return {j["id"]: A() for j, _ in pairs}
+
+    r = run_funnel(t, None, top_n=10, max_age_days=7, fresh_hours=24, now=NOW, workers=1, screen=screen,
+                   assess_many=assess_many, read_limit=2)
+    assert careful == ["j4", "j3"]  # highest quick scores first
+    assert any("wait for tomorrow's careful read" in e for e in r.errors)
+    waiting = [j for j in t.jobs.values() if j["status"] == "found" and j.get("score") is None]
+    assert len(waiting) == 3

@@ -36,6 +36,9 @@ class Settings:
     fresh_hours: int = 24
     # Most jobs per run that get traced to the employer's site / read in full before shortlisting.
     enrich_limit: int = 10
+    # Jobs the cheap first screen (Haiku) reads per run, and how many of those Sonnet then reads carefully.
+    screen_limit: int = 800
+    read_limit: int = 250
 
     anthropic_api_key: str | None = None
     adzuna_app_id: str | None = None

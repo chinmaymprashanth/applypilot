@@ -91,6 +91,15 @@ COLLECT = """() => {
               label: els.length === 1 && key.startsWith('checkbox') ? opts[0] : question(els[0], opts),
               required: els.some(required), filled: els.some(e => e.checked), options: opts});
   }
+  // Dropdowns built from a button that opens a list (Workday and similar): the label is on the button.
+  for (const btn of document.querySelectorAll('button[aria-haspopup="listbox"]')) {
+    if (!vis(btn)) continue;
+    const aria = btn.getAttribute('aria-label') || '';
+    const label = (ownLabel(btn) || question(btn, []) || aria).replace(/\\s*(select one|required)\\s*/gi, ' ').trim();
+    if (!label) continue;
+    out.push({id: tag(btn), kind: 'dropdown', label, required: /required/i.test(aria),
+              filled: !!txt(btn) && !/select one/i.test(txt(btn)), options: []});
+  }
   for (const yes of document.querySelectorAll('button')) {
     if (txt(yes) !== 'Yes' || !vis(yes)) continue;
     const no = [...yes.parentElement.querySelectorAll('button')].find(b => txt(b) === 'No');
@@ -146,7 +155,7 @@ ALTERNATES = {"company website": ["website", "career"]}
 def fill(page, q: Question, value: str) -> bool:
     """Put value into the question's field, trying other wordings for choice lists. True if it took."""
     choices = [v.strip() for v in value.split(" | ") if v.strip()]  # answers.yaml alternatives
-    if q.kind in ("select", "combobox", "radio", "yesno"):
+    if q.kind in ("select", "combobox", "radio", "yesno", "dropdown"):
         return any(_fill(page, q, v) for v in [*choices, *ALTERNATES.get(value.lower(), [])])
     return _fill(page, q, choices[0] if " | " in value else value)
 
@@ -191,6 +200,21 @@ def _fill(page, q: Question, value: str) -> bool:
             # Click what the user would click: the option's visible label.
             target.evaluate("e => (e.closest('label') || document.querySelector(`label[for='${e.id}']`) || e).click()")
         return target.is_checked()
+    if q.kind == "dropdown":
+        # Open the list, pick the matching option; type-ahead if the list is long.
+        loc.click()
+        options = page.locator("[role=option]:visible")
+        try:
+            options.first.wait_for(state="visible", timeout=4000)
+        except Exception:  # noqa: BLE001 - no list appeared
+            page.keyboard.press("Escape")
+            return False
+        i = best_option(options.all_inner_texts(), value)
+        if i is None:
+            page.keyboard.press("Escape")
+            return False
+        options.nth(i).click()
+        return True
     if q.kind == "combobox":
         # Type to search, then click the matching option in the list that appears.
         query = value.split(",")[0] if len(value) > 20 or "," in value else value
@@ -340,7 +364,7 @@ def open_application(page):
 
 
 # Cookie banners cover forms and block clicks. Only the most private choice is ever clicked.
-DECLINE_COOKIES = re.compile(r"^(decline( all)?|reject( all)?( cookies)?|deny( all)?|only (necessary|essential)( cookies)?|"
+DECLINE_COOKIES = re.compile(r"^(decline( all)?|decline optional cookies|reject( all)?( cookies)?|deny( all)?|only (necessary|essential)( cookies)?|"
                              r"(use )?(necessary|essential) (cookies )?only|refuse( all)?)$", re.I)
 
 

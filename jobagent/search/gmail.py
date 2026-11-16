@@ -1,5 +1,5 @@
-"""Job alert emails (LinkedIn, Indeed, Wellfound, Built In, YC Work at a Startup), read from
-Gmail with read-only access.
+"""Job alert emails (LinkedIn, Indeed, Glassdoor, ZipRecruiter, Dice, Wellfound, Built In, YC Work at a
+Startup, Handshake, Simplify), read from Gmail with read-only access.
 
 We never open those sites' pages. Jobs are read from the alert emails themselves;
 Claude turns each email into a list of jobs, and every link it returns must be one that
@@ -33,6 +33,11 @@ SENDERS = {
     "wellfound": ["wellfound.com", "angel.co"],
     "builtin": ["builtin.com"],
     "yc": ["workatastartup.com"],
+    "glassdoor": ["glassdoor.com"],
+    "ziprecruiter": ["ziprecruiter.com"],
+    "dice": ["dice.com"],
+    "handshake": ["joinhandshake.com"],
+    "simplify": ["simplify.jobs"],
 }
 
 

@@ -8,6 +8,8 @@ current_company: Example Corp
 current_title: Software Developer
 over_18: "Yes"
 state: California
+address_line1: ""
+postal_code: ""
 pronouns: ""
 noncompete: "No"
 salary_expectation: "Open; the posted range works for me"

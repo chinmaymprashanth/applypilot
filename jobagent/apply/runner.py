@@ -31,7 +31,9 @@ log = logging.getLogger(__name__)
 NO_AUTOMATION = ("linkedin", "indeed")  # never click inside these sites
 # Sites whose CAPTCHAs or bot checks reject an automated browser, or that need an account first. They are opened
 # in your own Chrome instead, where you're an ordinary visitor; jobagent never tries to get past those checks.
-OWN_BROWSER = {"workday", "oracle", "icims", "successfactors", "smartrecruiters", "workable", "amazon"}
+OWN_BROWSER = {"oracle", "icims", "successfactors", "smartrecruiters", "workable", "amazon"}
+# Sites that need you to sign in (your own account and password) before the form; jobagent then fills each step.
+SIGN_IN_FIRST = {"workday"}
 
 
 @dataclass
@@ -467,6 +469,19 @@ def open_in_own_chrome(url: str, job: dict, folder: Path, profile: Profile, answ
         echo(line)
 
 
+def workday_start(page) -> None:
+    """On a Workday job page: decline optional cookies and choose "Autofill with Resume" (or "Apply Manually")."""
+    for label in ("Autofill with Resume", "Apply Manually"):
+        try:
+            choice = page.get_by_text(label, exact=True).first
+            if choice.is_visible():
+                choice.click()
+                page.wait_for_timeout(2500)
+                return
+        except Exception:  # noqa: BLE001 - layout differs; the user can pick
+            continue
+
+
 def open_and_fill(page, job: dict, folder: Path, profile: Profile, answers: dict, master: MasterResume,
                   drafter: Drafter | None, echo: Callable[[str], None], ask: Callable[[str], str],
                   browser: dict) -> None:
@@ -494,6 +509,12 @@ def open_and_fill(page, job: dict, folder: Path, profile: Profile, answers: dict
     decline_cookies(page)
     page = open_application(page)  # job description pages: click Apply / I'm interested once
     browser["page"] = page
+    if ats_of(page.url) in SIGN_IN_FIRST:
+        workday_start(page)
+        echo(f"  Workday: sign in or create your {job['company']} account in the browser (your own password;")
+        echo("  the browser remembers it next time). On each step after that, press f here to fill it, then click")
+        echo("  Save and Continue yourself. Workday fills My Experience from your resume when you upload it.")
+        return
     if has_captcha(page) and not is_application_form(collect(page)):
         ask("  The site is showing a CAPTCHA. Solve it in the browser, then press Enter here: ")
         page.wait_for_timeout(2000)

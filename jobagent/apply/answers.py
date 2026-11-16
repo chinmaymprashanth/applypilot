@@ -48,7 +48,7 @@ def answer_for(label: str, kind: str, profile: Profile, answers: dict, master: M
     last = profile.name.split()[-1]
     a = lambda k: (answers.get(k) or None)  # noqa: E731 - blank in answers.yaml means "leave it"
 
-    choice = kind in ("select", "combobox", "radio", "yesno", "checkbox")
+    choice = kind in ("select", "combobox", "radio", "yesno", "checkbox", "dropdown")
     if OPTIONAL_CONTACT.search(" ".join([l, *(options or [])])):
         return Answer("optional_contact", a("optional_contact"), "declining optional texts/marketing")
     eeo = answers.get("eeo") or {}
@@ -82,6 +82,7 @@ def answer_for(label: str, kind: str, profile: Profile, answers: dict, master: M
         (r"preferred (first )?name", "preferred_name", first),
         (r"^(full )?name\*?$|^legal name|^your name", "full_name", profile.name),
         (r"e-?mail", "email", profile.email),
+        (r"phone device type|phone type|type of phone", "phone_type", "Mobile"),
         (r"phone|mobile", "phone", profile.phone),
         (r"linkedin", "linkedin", profile.linkedin),
         (r"github", "github", profile.github),
@@ -94,6 +95,10 @@ def answer_for(label: str, kind: str, profile: Profile, answers: dict, master: M
         (r"relocat", "relocation", a("willing_to_relocate")),
         (r"in (the )?office|on-?site|onsite|hybrid|days a week|commut", "work_mode", _yes(bool(profile.work_modes))),
         (r"which (u\.?s\.? )?state|state (do you|you) (reside|live)|state of residence", "state", a("state")),
+        (r"address line 1|street address", "address_line1", a("address_line1")),
+        (r"address line 2", "address_line2", None),
+        (r"postal code|zip", "postal_code", a("postal_code")),
+        (r"^city\b|^town\b", "city", (profile.location or "").split(",")[0].strip() or None),
         (r"location|city|where are you (based|located)|\baddress\b", "location", profile.location),
         (r"18 years|over 18|age of 18", "over_18", a("over_18")),
         (r"how did you (first )?(hear|find|learn)|^source\b|referr(ed|al) (by|source)", "referral_source", a("referral_source")),

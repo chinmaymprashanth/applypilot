@@ -353,3 +353,39 @@ def test_choose_jobs_before_anything_is_written(tmp_path):
     statuses = [t.jobs[j["id"]]["status"] for j in jobs]
     assert statuses == ["shortlisted", "skipped", "shortlisted", "shortlisted"]  # apply / no / later / quit
     assert any("score 80" in line for line in out)
+
+
+WORKDAY_LIKE = """<!doctype html><html><body><form>
+  <div><label for="hear">How Did You Hear About Us?*</label>
+    <button type="button" id="hear" aria-haspopup="listbox" aria-label="How Did You Hear About Us? select one required"
+      onclick="hearlist.hidden=false">select one</button>
+    <ul id="hearlist" role="listbox" hidden>
+      <li role="option" onclick="hear.innerText='LinkedIn'; hearlist.hidden=true">LinkedIn</li>
+      <li role="option" onclick="hear.innerText='Company Careers Website'; hearlist.hidden=true">Company Careers Website</li>
+    </ul></div>
+  <div><label for="g">Gender</label>
+    <button type="button" id="g" aria-haspopup="listbox" aria-label="Gender select one" onclick="glist.hidden=false">select one</button>
+    <ul id="glist" role="listbox" hidden>
+      <li role="option" onclick="g.innerText='Female'; glist.hidden=true">Female</li>
+      <li role="option" onclick="g.innerText='Male'; glist.hidden=true">Male</li>
+    </ul></div>
+  <label for="a1">Address Line 1*</label><input id="a1">
+  <label for="zip">Postal Code*</label><input id="zip">
+  <label for="pt">Phone Device Type*</label><input id="pt">
+</form></body></html>"""
+
+
+def test_workday_style_dropdowns_and_address(page, tmp_path):
+    (tmp_path / "Alex_Jordan_Rivera_Cover_Letter_Acme_SWE.txt").write_text(LETTER)
+    page.set_content(WORKDAY_LIKE)
+    answers = {**ANSWERS, "address_line1": "1 Main St", "postal_code": "90001"}
+    fill_form(page, {"company": "Acme", "title": "SWE"}, tmp_path, PROFILE, answers, MASTER, None, delay=False)
+    assert page.locator("#hear").inner_text() == "Company Careers Website"  # "Company website" reworded
+    assert page.locator("#g").inner_text() == "Male"
+    assert (page.locator("#a1").input_value(), page.locator("#zip").input_value()) == ("1 Main St", "90001")
+    assert page.locator("#pt").input_value() == "Mobile"
+
+
+def test_workday_opens_in_jobagents_browser_for_sign_in():
+    from jobagent.apply.runner import OWN_BROWSER, SIGN_IN_FIRST
+    assert "workday" not in OWN_BROWSER and "workday" in SIGN_IN_FIRST

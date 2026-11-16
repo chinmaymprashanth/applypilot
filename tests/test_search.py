@@ -254,3 +254,51 @@ def test_new_board_types_are_recognized_with_their_case():
     t = Tracker(Path("/nonexistent/t.xlsx"), Path("/nonexistent/jobs"), db_path=Path("/nonexistent/x.db"))
     t.add_board("oracle", "abc.fa.ocs.oraclecloud.com|CX_1")
     assert ("oracle", "abc.fa.ocs.oraclecloud.com|CX_1") in t.boards  # not lowercased
+
+
+def test_workday_422_is_retried_not_dropped(tmp_path):
+    tracker = Tracker(tmp_path / "t.xlsx", tmp_path / "jobs")
+    tracker.add_board("workday", "acme.wd5.myworkdayjobs.com|acme|careers")
+    c = _mock({"https://acme.wd5.myworkdayjobs.com/wday/cxs/acme/careers/jobs": httpx.Response(422, json={})})
+    report = run_search(load_settings(tmp_path), tracker, client=c, now=NOW)
+    board = tracker.boards[("workday", "acme.wd5.myworkdayjobs.com|acme|careers")]
+    assert report.boards_gone == 0 and board["failures"] == 1  # tried again tomorrow; dropped after 3 failures
+
+
+def _two_boards(tmp_path):
+    t = Tracker(tmp_path / "t.xlsx", tmp_path / "jobs")
+    t.add_board("lever", "blip")
+    t.add_board("lever", "private")
+    return t
+
+
+def test_network_blips_dont_count_but_refusals_do(tmp_path):
+    t = _two_boards(tmp_path)
+
+    def handler(request):
+        if "blip" in str(request.url):
+            raise httpx.ConnectError("nodename nor servname provided")
+        if "private" in str(request.url):
+            return httpx.Response(403)
+        return httpx.Response(404)
+
+    report = run_search(load_settings(tmp_path), t, client=httpx.Client(transport=httpx.MockTransport(handler)), now=NOW)
+    assert t.boards[("lever", "blip")]["failures"] == 0
+    assert t.boards[("lever", "private")]["failures"] == 1
+    assert report.hiccups == {"network": 1, "access refused": 1}
+
+
+def test_slow_down_is_waited_out_and_retried(tmp_path, monkeypatch):
+    monkeypatch.setattr("jobagent.search.runner.time.sleep", lambda s: None)
+    t = Tracker(tmp_path / "t.xlsx", tmp_path / "jobs")
+    t.add_board("lever", "busy")
+    calls = []
+
+    def handler(request):
+        if "api.lever.co" not in str(request.url):
+            return httpx.Response(404)
+        calls.append(1)
+        return httpx.Response(429, headers={"retry-after": "1"}) if len(calls) == 1 else httpx.Response(200, json=[])
+
+    report = run_search(load_settings(tmp_path), t, client=httpx.Client(transport=httpx.MockTransport(handler)), now=NOW)
+    assert len(calls) == 2 and report.boards_polled == 1 and not report.hiccups

@@ -13,6 +13,8 @@ description and the company's own apply link.
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -35,6 +37,31 @@ USER_AGENT = "jobagent/0.1 (personal job search)"
 MAX_FAILURES = 3
 
 
+# How many sites of a throttling service are checked at the same time.
+PER_SERVICE = {"workable": 2, "smartrecruiters": 4, "eightfold": 1, "amazon": 1}
+TEMPORARY = ("network", "timeout", "slow down", "server error")
+
+
+def error_kind(e: Exception) -> str:
+    """A short, plain label for why a site couldn't be checked."""
+    if isinstance(e, httpx.HTTPStatusError):
+        code = e.response.status_code
+        if code == 429:
+            return "slow down"
+        if code >= 500:
+            return "server error"
+        if code in (401, 403):
+            return "access refused"
+        return f"HTTP {code}"
+    if isinstance(e, httpx.TimeoutException):
+        return "timeout"
+    if isinstance(e, (httpx.ConnectError, httpx.NetworkError, OSError)):
+        return "network"
+    if isinstance(e, ValueError):
+        return "unexpected reply"
+    return "other"
+
+
 @dataclass
 class SearchReport:
     by_source: dict[str, int] = field(default_factory=dict)
@@ -46,6 +73,7 @@ class SearchReport:
     boards_gone: int = 0
     stale: int = 0
     added: int = 0
+    hiccups: dict[str, int] = field(default_factory=dict)  # sites that couldn't be checked, by reason
     errors: list[str] = field(default_factory=list)
 
 
@@ -179,13 +207,28 @@ def run_search(
         def skip(job: dict) -> bool:
             return job_id(job["url"]) in tracker.jobs
 
+        # Services that throttle: at most this many of their sites are checked at once.
+        gates = {ats: threading.Semaphore(n) for ats, n in PER_SERVICE.items()}
+
         def poll(b: dict):
             key = (b["ats_type"], b["token"])
-            try:
-                jobs = finder.boards.get(key) or FETCHERS[b["ats_type"]](client, b["token"], since=since, skip=skip)
-                return b, jobs, None
-            except Exception as e:  # noqa: BLE001 - one bad board shouldn't stop the run
-                return b, None, e
+            gate = gates.get(b["ats_type"])
+            for attempt in range(3):
+                try:
+                    if gate:
+                        with gate:
+                            jobs = FETCHERS[b["ats_type"]](client, b["token"], since=since, skip=skip)
+                    else:
+                        jobs = finder.boards.get(key) or FETCHERS[b["ats_type"]](client, b["token"], since=since, skip=skip)
+                    return b, jobs, None
+                except httpx.HTTPStatusError as e:
+                    if e.response.status_code != 429 or attempt == 2:
+                        return b, None, e
+                    # "Slow down": wait as long as the service asks (or a few seconds), then try again.
+                    time.sleep(min(float(e.response.headers.get("retry-after") or 5 * (attempt + 1)), 30))
+                except Exception as e:  # noqa: BLE001 - one bad board shouldn't stop the run
+                    return b, None, e
+            return b, None, RuntimeError("retries exhausted")
 
         polled: set[tuple[str, str]] = set()
         with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -196,8 +239,11 @@ def run_search(
                     log.info("%s/%s: board gone, dropping it", b["ats_type"], b["token"])
                     continue
                 if err:
-                    b["failures"] += 1
-                    report.errors.append(f"{b['ats_type']}/{b['token']}: {err}")
+                    kind = error_kind(err)
+                    report.hiccups[kind] = report.hiccups.get(kind, 0) + 1
+                    log.warning("%s/%s: %s", b["ats_type"], b["token"], err)
+                    if kind not in TEMPORARY:  # network blips and "slow down" don't count against the site
+                        b["failures"] += 1
                     continue
                 b.update(last_polled=now_iso(), failures=0)
                 if b["ats_type"] != "greenhouse":  # Lever/Ashby feeds only give the board token

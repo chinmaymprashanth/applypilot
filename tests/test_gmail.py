@@ -125,3 +125,11 @@ def test_startup_alert_senders():
     assert "from:workatastartup.com" in gmail.alert_query(7)
     url = gmail.canonical_job_link("wellfound", "https://wellfound.com/jobs/123-swe?utm_source=email#top")
     assert url == "https://wellfound.com/jobs/123-swe"
+
+
+def test_more_job_sites_alerts_are_read():
+    for sender, platform in [("Glassdoor Jobs <noreply@glassdoor.com>", "glassdoor"),
+                             ("ZipRecruiter <alerts@ziprecruiter.com>", "ziprecruiter"),
+                             ("Dice <jobs@connect.dice.com>", "dice"), ("Handshake <mail@joinhandshake.com>", "handshake")]:
+        assert gmail._platform(sender) == platform
+    assert "from:glassdoor.com" in gmail.alert_query(7)

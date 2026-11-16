@@ -145,6 +145,16 @@ def search() -> None:
         f"New-grad list: {report.newgrad_listings} recent US tech roles. Alert emails read: {report.emails_read}. "
         f"Skipped {report.stale} older than {s.max_age_days} days."
     )
+    if report.hiccups:
+        reasons = {"network": "internet connection blips (not counted against the site)",
+                   "timeout": "slow sites (not counted against the site)",
+                   "slow down": "services asked us to slow down (not counted against the site)",
+                   "server error": "the site's own server errors (not counted against the site)",
+                   "access refused": "private or blocked sites (dropped after 3 days)",
+                   "unexpected reply": "sites that moved (dropped after 3 days)"}
+        typer.echo(f"Couldn't check {sum(report.hiccups.values())} sites today (details in the log):")
+        for kind, n in sorted(report.hiccups.items(), key=lambda kv: -kv[1]):
+            typer.echo(f"  {n:>4}  {reasons.get(kind, kind)}")
     for e in report.errors:
         typer.secho(f"  {e}", fg="yellow")
     return report
@@ -250,7 +260,7 @@ def score() -> None:
     with _enricher(s, t, client) as enricher:
         r = run_funnel(t, assess, top_n=s.top_n, max_age_days=s.max_age_days, fresh_hours=s.fresh_hours,
                        enrich=enricher.enrich, enrich_limit=s.enrich_limit, screen=screen, assess_many=assess_many,
-                       top_n_intern=s.top_n_intern)
+                       top_n_intern=s.top_n_intern, limit=s.screen_limit, read_limit=s.read_limit)
     t.save()
     _save_costs(s)
 

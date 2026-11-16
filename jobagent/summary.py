@@ -21,7 +21,9 @@ SOURCE_NAMES = {"greenhouse": "Company boards (Greenhouse)", "lever": "Company b
                 "oracle": "Company sites (Oracle)", "amazon": "Amazon careers", "eightfold": "Netflix careers", "newgrad_list": "New-grad list (other company sites)",
                 "intern_list": "Internship list (Summer/Fall 2027)",
                 "adzuna": "Adzuna search", "gmail_linkedin": "LinkedIn alerts", "gmail_indeed": "Indeed alerts",
-                "gmail_wellfound": "Wellfound alerts", "gmail_builtin": "Built In alerts", "gmail_yc": "YC alerts"}
+                "gmail_wellfound": "Wellfound alerts", "gmail_builtin": "Built In alerts", "gmail_yc": "YC alerts",
+                "gmail_glassdoor": "Glassdoor alerts", "gmail_ziprecruiter": "ZipRecruiter alerts",
+                "gmail_dice": "Dice alerts", "gmail_handshake": "Handshake alerts", "gmail_simplify": "Simplify alerts"}
 STAGES = {"age": "older than 7 days", "1 us": "not in the US", "2 tech": "not a tech role",
           "3 experience": "needs 3+ years / senior / clearance", "4 career": "data entry, internship or no growth",
           "5 fit": "weak match with your skills", "applied": "already applied",
@@ -49,8 +51,11 @@ def build_summary(tracker: Tracker, search=None, funnel=None, tailored=None, inb
                 f"- New-grad list: {search.newgrad_listings} recent roles; internship list: "
                 f"{search.intern_listings}; alert emails read: {search.emails_read}",
                 f"- Skipped as older than {max_age_days} days: {search.stale}"]
+        if search.hiccups:
+            out.append("- Sites that couldn't be checked today (tried again tomorrow): "
+                       + ", ".join(f"{n} {kind}" for kind, n in sorted(search.hiccups.items(), key=lambda kv: -kv[1])))
         if search.errors:
-            out.append(f"- Hiccups (retried next run): {len(search.errors)}, e.g. {search.errors[0][:100]}")
+            out.append(f"- Other hiccups: {len(search.errors)}, e.g. {search.errors[0][:100]}")
         out.append("")
 
     if funnel is not None:

@@ -160,8 +160,8 @@ def fetch_workday(
     for page in range(WORKDAY_PAGES):
         r = client.post(url, json={"appliedFacets": {}, "limit": 20, "offset": page * 20, "searchText": ""},
                         headers={"Accept": "application/json"})
-        if r.status_code in (404, 410, 422) and page == 0:
-            raise BoardNotFound(url)
+        if r.status_code in (404, 410) and page == 0:
+            raise BoardNotFound(url)  # gone for good; a 422 or 5xx counts as a failure and is retried 3 days
         r.raise_for_status()
         postings = r.json().get("jobPostings") or []
         too_old = False
