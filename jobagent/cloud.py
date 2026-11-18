@@ -41,6 +41,20 @@ def region() -> str:
     return os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION") or "us-east-1"
 
 
+# Files you edit yourself on the Mac. If one changed since the last sync, your copy wins over the cloud's.
+YOUR_FILES = ("master_resume.yaml", "profile.yaml", "answers.yaml", "gmail_credentials.json")
+
+
+def edited_since_sync(data_dir: Path) -> dict[str, bytes]:
+    """{file name: contents} for your own files changed on this machine after the last upload or download."""
+    at = read_sync(data_dir).get("at")
+    if not at:
+        return {}
+    since = datetime.fromisoformat(at).timestamp()
+    return {name: (data_dir / name).read_bytes() for name in YOUR_FILES
+            if (data_dir / name).exists() and (data_dir / name).stat().st_mtime > since}
+
+
 def bucket_name() -> str | None:
     return os.getenv(BUCKET_ENV) or None
 

@@ -386,8 +386,14 @@ def _sync_down(store, data_dir: Path) -> None:
         backup = cloud.backup_local(data_dir)
         typer.secho(f"Your last apply session didn't finish uploading; a copy of it is saved at {backup}. "
                     "Check `status` for any job you marked as submitted then.", fg="yellow")
+    mine = cloud.edited_since_sync(data_dir)  # e.g. a master resume you just edited
     typer.echo("Downloading today's results from AWS...")
     store.pull(data_dir)
+    for name, content in mine.items():
+        (data_dir / name).write_bytes(content)
+        typer.echo(f"  kept your edited {name} (it goes up to AWS when you finish)")
+    if mine:
+        cloud.mark_dirty(data_dir)
 
 
 def _apply_local(limit: int | None) -> None:
