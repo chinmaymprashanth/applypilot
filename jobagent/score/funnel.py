@@ -40,6 +40,9 @@ SENIOR = re.compile(r"\b(senior|sr\.?|staff|principal|lead|manager|director|arch
 OTHER_FIELD = re.compile(r"\b(mechanical|electrical|civil|chemical|structural|manufacturing|hardware|firmware|"
                          r"embedded|analog|asic|fpga|rf|mechatronics|hvac|nurse|nursing|physician|pharmac\w*|"
                          r"clinical|therapist|technician)\b", re.I)
+# Analyst roles of any kind (data, business, policy...): the candidate has chosen not to apply to them.
+ANALYST = re.compile(r"\banalysts?\b", re.I)
+ANALYST_FAMILIES = {"data_analyst", "business_analyst"}
 # At most this many jobs per company are read each day; the rest wait for the next run.
 PER_COMPANY = 3
 # The lenient first screen lets through anything at or above this fit; the careful read uses MIN_SKILLS_MATCH.
@@ -100,9 +103,10 @@ Rules:
   can be software roles; "Analyst" can be data analysis or clerical work. Decide from the duties.
 - required_years: only experience the posting requires ("must have", "minimum", "X+ years required").
   Put "preferred"/"nice to have" years in preferred_years instead. Ranges like "2-4 years" count as 2.
-- Salesforce administrator, developer, consultant or CRM analyst roles are tech roles: role_family "salesforce".
-- Analyst roles at tech companies that aren't strictly technical (policy, regulatory, operations, strategy,
-  business analyst) count for this candidate: role_family "business_analyst".
+- Salesforce administrator, developer or consultant roles are tech roles: role_family "salesforce".
+- Roles whose main work is analysis rather than building software or AI (data analyst, business analyst,
+  policy, operations or strategy analyst): role_family "data_analyst" or "business_analyst", whatever the
+  title says. The candidate isn't applying to analyst roles.
 - Internships and co-ops are fine for this candidate; list "unpaid" in red_flags if the posting says so.
   The candidate is a Salesforce Certified Administrator; Apex/LWC development is training only.
 - low_skill: true for work with no engineering or analysis and no growth path: data entry, manual QA
@@ -161,6 +165,8 @@ def precheck(job: dict, tracker: Tracker, max_age_days: int, now: datetime) -> V
         return Verdict("3 experience", "mid-level title")
     if OTHER_FIELD.search(job["title"]):
         return Verdict("2 tech", "a field outside your background (by title)")
+    if ANALYST.search(job["title"]):
+        return Verdict("2 tech", "analyst role (you've chosen to skip these, by title)")
     if tracker.already_applied(job["company"], job["title"]):
         return Verdict("applied", "already applied to this company and role")
     return None
@@ -172,7 +178,9 @@ def judge(a: Assessment, job: dict, fresh_hours: int, now: datetime, min_match: 
     pass, which leaves the finer calls (mid-level duties) to the careful read."""
     if a.us_eligible == "no":
         return Verdict("1 us", "description says not open to US-based candidates")
-    if a.role_family == "non_tech" or (not a.is_tech_role and a.role_family != "business_analyst"):
+    if a.role_family in ANALYST_FAMILIES:
+        return Verdict("2 tech", f"analyst work, which you've chosen to skip ({a.summary})")
+    if a.role_family == "non_tech" or not a.is_tech_role:
         return Verdict("2 tech", f"not a tech role ({a.summary})")
     if a.required_years is not None and a.required_years >= 3:
         return Verdict("3 experience", f"requires {a.required_years}+ years")

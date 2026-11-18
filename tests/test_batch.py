@@ -57,3 +57,28 @@ def test_cost_meter_prices_by_model_and_saves_daily_totals(tmp_path):
     m.flush(path, day="2026-11-13")
     m.record("research", "claude-sonnet-5-5", usage)
     assert m.flush(path, day="2026-11-13") == {"research": 0.13}
+
+
+def test_stopped_run_collects_its_batch_instead_of_paying_twice(monkeypatch, tmp_path):
+    monkeypatch.setattr("jobagent.batch.time.sleep", lambda s: None)
+    monkeypatch.setattr("jobagent.batch.STATE", tmp_path / "batches.json")
+    monkeypatch.setattr("jobagent.batch.METER", llm.CostMeter())
+
+    class Stopped(Exception):
+        pass
+
+    first = FakeBatches()
+    first.retrieve = lambda bid: (_ for _ in ()).throw(Stopped())  # the computer is taken back mid-wait
+    try:
+        run_batch(NS(messages=NS(batches=first)), model="m", schema=Answer, system="s", items={"a": "x", "b": "y"},
+                  step="scoring")
+    except Stopped:
+        pass
+    assert "b1" in (tmp_path / "batches.json").read_text()
+
+    second = FakeBatches()
+    out = run_batch(NS(messages=NS(batches=second)), model="m", schema=Answer, system="s",
+                    items={"a": "x", "b": "y"}, step="scoring")
+    assert second.sent is None  # nothing submitted again
+    assert out["a"] == Answer(ok=True)
+    assert not (tmp_path / "batches.json").read_text().strip("{}\n ")  # forgotten once collected

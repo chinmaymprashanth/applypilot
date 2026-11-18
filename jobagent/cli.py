@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from contextlib import contextmanager
+import os
 from datetime import date
 from pathlib import Path
 
@@ -227,7 +228,7 @@ def _enricher(s, t: Tracker, client):
         browser = pw.chromium.launch()
         page = browser.new_page(viewport={"width": 1280, "height": 900})
         page.set_default_timeout(20000)
-        e = Enricher(client, s.model, page, http, boards, s.data_dir / "company_careers.json")
+        e = Enricher(client, s.search_model, page, http, boards, s.data_dir / "company_careers.json")
         try:
             yield e
         finally:
@@ -241,11 +242,13 @@ def _enricher(s, t: Tracker, client):
 @app.command()
 def score() -> None:
     """Run the funnel (US, tech, <3 years, real career role, fit) and shortlist the top jobs."""
+    from . import batch
     from .llm import make_client
     from .score.funnel import claude_assessor, claude_batch_assessor, run_funnel
 
     s = load_settings()
     _setup_logging(s.logs_dir)
+    batch.STATE = s.data_dir / "batches.json"  # lets a stopped run collect batches it already paid for
     t = _tracker()
     client = make_client(s.anthropic_api_key)
     resume = load_master_resume(s.master_resume_path)
@@ -299,7 +302,7 @@ def tailor(limit: int = typer.Option(None, help="Only prepare this many jobs")) 
     generate = claude_generator(client, s.model, master)
 
     def research(company: str, title: str) -> list[str]:
-        return research_company(client, s.model, company, title, s.data_dir / "companies")
+        return research_company(client, s.search_model, company, title, s.data_dir / "companies")
 
     with Renderer(s.templates_dir) as renderer:
         r = run_tailor(t, master, load_profile(s.profile_path), generate, renderer, s.output_dir, limit=limit,
@@ -340,10 +343,58 @@ def rerender() -> None:
 
 
 def _apply(limit: int | None) -> None:
+    from . import cloud
+
+    bucket = cloud.bucket_name()
+    if not bucket:
+        return _apply_local(limit)
+    s = load_settings()
+    store = cloud.Store(bucket)
+    try:
+        store.lock(cloud.owner_name())
+    except cloud.LockHeld as e:
+        typer.secho(f"Not starting: {e}. Try again when it finishes (the daily run takes 30-90 minutes).",
+                    fg="yellow", bold=True)
+        raise typer.Exit(1)
+    synced = False
+    try:
+        _sync_down(store, s.data_dir)
+        synced = True  # only data that started from the cloud's latest copy is ever uploaded back
+        cloud.mark_dirty(s.data_dir)
+        _apply_local(limit)
+    finally:
+        try:
+            if synced:
+                typer.echo("Uploading your progress to AWS...")
+                store.push(s.data_dir)
+        finally:
+            store.unlock()
+
+
+def _sync_down(store, data_dir: Path) -> None:
+    """Download the cloud's newer data, keeping a backup of anything local that was never uploaded."""
+    from . import cloud
+
+    remote, local = store.remote_version(), cloud.read_sync(data_dir)
+    if remote is None:
+        typer.echo("Nothing in AWS yet; uploading your data first.")
+        store.push(data_dir)
+        return
+    if remote == local.get("version"):
+        return
+    if local.get("dirty"):
+        backup = cloud.backup_local(data_dir)
+        typer.secho(f"Your last apply session didn't finish uploading; a copy of it is saved at {backup}. "
+                    "Check `status` for any job you marked as submitted then.", fg="yellow")
+    typer.echo("Downloading today's results from AWS...")
+    store.pull(data_dir)
+
+
+def _apply_local(limit: int | None) -> None:
     import yaml
 
     from .apply.runner import claude_drafter, run_apply
-    from .llm import make_client
+    from .llm import CREDITS_HELP, has_credits, make_client
     from .tailor.research import research_company
     from .tailor.runner import Preparer
     from .tailor.writer import claude_generator, claude_patcher
@@ -354,16 +405,21 @@ def _apply(limit: int | None) -> None:
     profile, master = load_profile(s.profile_path), load_master_resume(s.master_resume_path)
     answers = yaml.safe_load(s.answers_path.read_text()) or {}
     client = make_client(s.anthropic_api_key)
+    if not has_credits(client, s.screen_model):
+        typer.secho(CREDITS_HELP, fg="red", bold=True)
+        raise typer.Exit(1)
     drafter = claude_drafter(client, s.model, master, profile)
 
     def research(company: str, title: str) -> list[str]:
-        return research_company(client, s.model, company, title, s.data_dir / "companies")
+        return research_company(client, s.search_model, company, title, s.data_dir / "companies")
 
     preparer = Preparer(t, master, profile, claude_generator(client, s.model, master), s.output_dir, s.templates_dir,
                         research, claude_patcher(client, s.model, master))
     counts = run_apply(t, profile, answers, master, s.browser_profile_dir, drafter, preparer=preparer,
                        echo=typer.echo, limit=limit)
     _save_costs(s)
+    if counts.get("out_of_credits"):
+        typer.secho(f"\nStopped early: {CREDITS_HELP}", fg="red", bold=True)
     typer.echo(f"\nDone: {counts['applied']} applied, {counts['skipped']} skipped, {counts['later']} left for later. "
                f"Tracker: {s.tracker_path}")
 
@@ -389,7 +445,7 @@ def inbox(days: int = typer.Option(30, help="How far back to look")) -> None:
     t = _tracker()
     try:
         svc = gmail.service(s.data_dir / "gmail_token.json")
-        r = inbox_mod.check_inbox(t, svc, inbox_mod.claude_classifier(make_client(s.anthropic_api_key), s.model),
+        r = inbox_mod.check_inbox(t, svc, inbox_mod.claude_classifier(make_client(s.anthropic_api_key), s.screen_model),
                                   s.data_dir / "inbox_seen.json", days=days)
     except gmail.GmailAuthError as e:
         typer.secho(f"Inbox not checked: {e}", fg="yellow")
@@ -419,12 +475,17 @@ def insights() -> None:
 
 
 @app.command()
-def prepare() -> None:
+def prepare() -> str:
     """Check replies, find jobs and pick today's best: everything except the browser. Safe to schedule.
     Ends with a summary, also saved as output/<date>/summary.md. Resumes are written when you apply."""
     from .summary import build_summary, save_summary
 
+    from .llm import CREDITS_HELP, METER, has_credits, make_client
+
     s = load_settings()
+    if s.anthropic_api_key and not has_credits(make_client(s.anthropic_api_key), s.screen_model):
+        typer.secho(f"{CREDITS_HELP}\nNot starting: without Claude, jobs can't be scored.", fg="red", bold=True)
+        raise typer.Exit(1)
     typer.secho("\n== 1. inbox: replies from employers ==", bold=True)
     inbox_report = inbox(days=30)
     typer.secho("\n== 2. search: new jobs from every source ==", bold=True)
@@ -435,10 +496,14 @@ def prepare() -> None:
     # Resumes and cover letters are written at apply time, only for the jobs you choose.
     text = build_summary(_tracker(), search_report, funnel_report, None, inbox_report,
                          max_age_days=s.max_age_days, costs=costs)
+    if METER.out_of_credits:
+        text = ("> **Claude credits ran out during this run.** Some jobs weren't scored or traced and today's "
+                f"shortlist may be short. {CREDITS_HELP}\n\n" + text)
     path = save_summary(text, s.output_dir)
     typer.secho("\n" + "=" * 70, bold=True)
     typer.echo(text)
     typer.secho(f"\n(Saved to {path})", fg="cyan")
+    return text
 
 
 @app.command()
@@ -534,3 +599,111 @@ def eval_cmd(no_screen: bool = typer.Option(False, "--no-screen", help="Test Son
                f"({'Sonnet only' if no_screen else 'Haiku screen + Sonnet'}), cost ${cost:.2f}:")
     for line in report.lines():
         typer.echo(line)
+
+
+# ---- AWS ------------------------------------------------------------------------------------------------------
+def _store():
+    from . import cloud
+
+    bucket = cloud.bucket_name()
+    if not bucket:
+        typer.secho(f"Set {cloud.BUCKET_ENV} in .env first (the bucket name Terraform printed).", fg="red")
+        raise typer.Exit(1)
+    return cloud.Store(bucket)
+
+
+@app.command("cloud-secrets")
+def cloud_secrets() -> None:
+    """Store your Anthropic key and Gmail sign-in in AWS Parameter Store (encrypted). Re-run after gmail-login."""
+    from . import cloud
+
+    s = load_settings()
+    values = {}
+    if s.anthropic_api_key:
+        values[cloud.PARAM_ANTHROPIC] = s.anthropic_api_key
+    token = s.data_dir / "gmail_token.json"
+    if token.exists():
+        values[cloud.PARAM_GMAIL] = token.read_text()
+    for name in cloud.put_secrets(values):
+        typer.echo(f"  stored {name} (encrypted)")
+
+
+@app.command("cloud-push")
+def cloud_push() -> None:
+    """Upload data/ to AWS (normally automatic: apply does it when it finishes)."""
+    from . import cloud
+
+    s = load_settings()
+    store = _store()
+    store.lock(cloud.owner_name())
+    try:
+        typer.echo(f"Uploaded, version {store.push(s.data_dir)}")
+    finally:
+        store.unlock()
+
+
+@app.command("cloud-pull")
+def cloud_pull() -> None:
+    """Download the latest data from AWS (normally automatic: apply does it when it starts)."""
+    s = load_settings()
+    _sync_down(_store(), s.data_dir)
+    typer.echo("Up to date with AWS.")
+
+
+@app.command("cloud-prepare", hidden=True)
+def cloud_prepare(backup: bool = typer.Option(False, help="The 9:30 backup run: only if today's run didn't finish")) -> None:
+    """The daily run inside AWS: lock, download, prepare, upload, email, unlock."""
+    import signal
+    import traceback
+    from datetime import date
+
+    from . import cloud
+    from .llm import CREDITS_HELP, has_credits, make_client
+
+    s = load_settings()
+    store = _store()
+    today = date.today().isoformat()  # the container's TZ is your time zone
+    done_key = f"runs/{today}/done"
+    email = os.getenv("SUMMARY_EMAIL")
+    version = os.getenv("APP_VERSION", "dev")
+    if backup and store.exists(done_key):
+        typer.echo("Today's run already finished; nothing to do.")
+        return
+    if not has_credits(make_client(s.anthropic_api_key), s.screen_model):
+        if email:
+            cloud.send_email(email, f"ApplyPilot {today}: not run, Claude credits are out", CREDITS_HELP)
+        raise typer.Exit(1)
+
+    def stop(signum, frame):  # Spot: AWS wants the computer back (2 minutes' notice)
+        raise SystemExit(143)
+
+    signal.signal(signal.SIGTERM, stop)
+    cloud.wait_for_lock(store, cloud.owner_name(), minutes=90, echo=typer.echo)
+    outcome, text, pulled = "failed", "", False
+    try:
+        if store.pull(s.data_dir) is None:
+            raise RuntimeError("No data in S3 yet: run `python -m jobagent cloud-push` on your Mac first.")
+        pulled = True
+        if os.getenv("GMAIL_TOKEN"):
+            (s.data_dir / "gmail_token.json").write_text(os.environ["GMAIL_TOKEN"])
+        text = prepare()
+        store.put_text(f"summaries/{today}.md", text)
+        store.put_text(done_key, version)
+        outcome = "ok"
+    except SystemExit as e:
+        if e.code == 143:
+            outcome = "interrupted"
+        raise
+    except BaseException:
+        text = traceback.format_exc()[-3000:]
+        raise
+    finally:
+        try:
+            if pulled:  # never upload a container that didn't start from your real data
+                store.push(s.data_dir)
+        finally:
+            store.unlock()
+        if email and outcome != "interrupted":  # an interrupted run is finished by the backup run
+            subject = f"ApplyPilot {today}: " + ("your daily picks" if outcome == "ok" else "the daily run failed")
+            cloud.send_email(email, subject, f"(ApplyPilot version {version}, run in AWS)\n\n{text}")
+

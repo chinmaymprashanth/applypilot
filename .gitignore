@@ -10,3 +10,8 @@ __pycache__/
 tracker.xlsx
 *.tmp.xlsx
 .DS_Store
+data_backup_*
+infra/.terraform/
+infra/*.tfstate*
+infra/terraform.tfvars
+infra/.terraform.tfstate.lock.info

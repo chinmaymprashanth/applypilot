@@ -55,7 +55,7 @@ def test_funnel_stages_in_order_and_top_n(tmp_path):
         {"title": "Engineer", "desc": "india"},
         {"title": "Engineer, Platform", "desc": "hr"},
         {"title": "Backend Engineer", "desc": "5yrs"},
-        {"title": "Data Analyst", "desc": "entry"},
+        {"title": "Data Engineer", "desc": "entry"},
         {"title": "Research Engineer", "desc": "research"},
         {"title": "Solutions Engineer", "desc": "weak"},
         {"title": "Senior Software Engineer", "desc": "never read"},
@@ -68,7 +68,7 @@ def test_funnel_stages_in_order_and_top_n(tmp_path):
         "india": A(us_eligible="no"),
         "hr": A(is_tech_role=False, role_family="non_tech", summary="HR coordinator"),
         "5yrs": A(required_years=5),
-        "entry": A(role_family="data_analyst", low_skill=True, summary="Typing invoices into a spreadsheet"),
+        "entry": A(role_family="support_solutions", low_skill=True, summary="Typing invoices into a spreadsheet"),
         "research": A(expected_level="senior", summary="Needs a publication record"),
         "weak": A(skills_match=30, role_family="support_solutions"),
         "unpaidintern": A(red_flags=["Unpaid internship"]),  # internships are read now; unpaid ones dropped
@@ -188,7 +188,7 @@ def test_salesforce_titles_are_searched(title, keep):
 
 
 def test_lenient_first_screen_then_careful_read(tmp_path):
-    t = _tracker(tmp_path, [{"title": "Software Engineer", "desc": "clear"}, {"title": "Data Analyst", "desc": "border"},
+    t = _tracker(tmp_path, [{"title": "Software Engineer", "desc": "clear"}, {"title": "Data Engineer", "desc": "border"},
                             {"title": "Backend Engineer", "desc": "fiveyrs"}])
     screened, careful = [], []
 
@@ -225,20 +225,37 @@ def test_per_company_cap_and_other_fields_are_free_checks(tmp_path):
 
 
 def test_eval_driven_rules(tmp_path):
-    t = _tracker(tmp_path, [{"title": "Regulatory Policy Analyst", "desc": "policy"},
-                            {"title": "Mid-Level Engineer", "desc": "mid"}, {"title": "Data Intern", "desc": "intern"}])
-    answers = {"policy": A(is_tech_role=False, role_family="business_analyst"), "mid": A(expected_level="mid"),
-               "intern": A()}
+    t = _tracker(tmp_path, [{"title": "Mid-Level Engineer", "desc": "mid"}, {"title": "Data Intern", "desc": "intern"}])
+    answers = {"mid": A(expected_level="mid"), "intern": A()}
     r = run_funnel(t, lambda j, d: answers[d.split()[0]], top_n=5, max_age_days=7, fresh_hours=24, now=NOW, workers=1)
-    assert sorted(j["title"] for j in r.shortlisted) == ["Data Intern", "Regulatory Policy Analyst"]
+    assert sorted(j["title"] for j in r.shortlisted) == ["Data Intern"]
     assert r.dropped == {"3 experience": 1}  # "Mid-Level" in the title is a free check
 
 
+def test_analyst_roles_are_skipped(tmp_path):
+    # By title for free, and by the work itself when the title doesn't say "analyst".
+    t = _tracker(tmp_path, [{"title": "Regulatory Policy Analyst", "desc": "x"},
+                            {"title": "CRM Analyst", "desc": "x"},
+                            {"title": "Insights Associate", "desc": "analysis"},
+                            {"title": "Software Engineer", "desc": "swe"}])
+    answers = {"analysis": A(role_family="data_analyst"), "swe": A()}
+    read = []
+
+    def assess(j, d):
+        read.append(j["title"])
+        return answers[d.split()[0]]
+
+    r = run_funnel(t, assess, top_n=5, max_age_days=7, fresh_hours=24, now=NOW, workers=1)
+    assert [j["title"] for j in r.shortlisted] == ["Software Engineer"]
+    assert sorted(read) == ["Insights Associate", "Software Engineer"]  # analyst titles never cost a Claude read
+    assert r.dropped == {"2 tech": 3}
+
+
 def test_mid_level_duties_rank_below_entry_level(tmp_path):
-    t = _tracker(tmp_path, [{"title": "Associate Analyst", "desc": "mid"}, {"title": "Data Analyst", "desc": "entry"}])
+    t = _tracker(tmp_path, [{"title": "Associate Engineer", "desc": "mid"}, {"title": "Data Engineer", "desc": "entry"}])
     r = run_funnel(t, lambda j, d: A(expected_level="mid" if d.startswith("mid") else "entry"), top_n=5,
                    max_age_days=7, fresh_hours=24, now=NOW, workers=1)
-    assert [j["title"] for j in r.shortlisted] == ["Data Analyst", "Associate Analyst"]  # kept, but ranked lower
+    assert [j["title"] for j in r.shortlisted] == ["Data Engineer", "Associate Engineer"]  # kept, but ranked lower
     assert r.shortlisted[0]["score"] - r.shortlisted[1]["score"] == 20
 
 

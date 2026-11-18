@@ -1,0 +1,19 @@
+# Never copied into the image: personal data, secrets, local state.
+.env
+data/
+data_backup_*
+output/
+logs/
+browser_profile/
+tracker.xlsx
+~$*
+.venv/
+.git/
+**/__pycache__/
+.pytest_cache/
+infra/.terraform/
+infra/*.tfstate*
+infra/terraform.tfvars
+tests/
+examples/
+.DS_Store

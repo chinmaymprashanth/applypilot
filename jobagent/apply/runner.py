@@ -17,6 +17,7 @@ from typing import Callable
 
 from pydantic import BaseModel, Field
 
+from ..llm import CREDITS_HELP, is_out_of_credits
 from ..profile import MasterResume, Profile
 from ..search.common import ats_of, detect_board
 from ..tailor.runner import doc_names
@@ -350,6 +351,13 @@ def run_apply(tracker: Tracker, profile: Profile, answers: dict, master: MasterR
                 try:
                     info = preparer.save(job, futures[job["id"]].result(), renderer)
                 except Exception as e:  # noqa: BLE001 - keep it on the shortlist for another try
+                    if is_out_of_credits(e):
+                        # Every other resume would fail the same way: stop now and say why.
+                        writer.shutdown(wait=False, cancel_futures=True)
+                        echo(f"\n  ! {CREDITS_HELP}\n  Your chosen jobs stay on the shortlist; "
+                             "nothing was lost and nothing was charged for them.")
+                        counts["out_of_credits"] = 1
+                        break
                     echo(f"  ! Couldn't write this one ({str(e).splitlines()[0][:120]}); it stays on your shortlist.")
                     continue
                 echo(f"  Resume ready: {info['track']} track, {info['covered']}% of your matching keywords"

@@ -47,7 +47,7 @@ inbox → search → free checks → Haiku screen → Sonnet review → full pos
 - **Evaluation.** `eval-label` builds a labelled set of real jobs; `eval` measures which good jobs the funnel
   would drop and which bad ones it would keep. Used to tune the rules (good-job recall 74% → 89%).
 - **Human in the loop.** The candidate chooses every application and clicks every Submit.
-- 179 automated tests (pytest), including browser tests against local forms.
+- 200+ automated tests (pytest), including browser tests against local forms.
 
 ## Setup
 
@@ -76,9 +76,33 @@ job in your own Chrome.
 Other commands: `schedule --at 07:30` (daily prepare via macOS launchd), `inbox`, `insights`, `eval-label`,
 `eval`, `status <id> <status>`, `rerender`, `tailor`, `check`. Run any with `--help`.
 
+## Running in AWS (optional)
+
+The daily `prepare` can run unattended in AWS while `apply` stays on your Mac:
+
+```
+EventBridge Scheduler (7:00, Fargate Spot) ──> ECS Fargate task (Docker image from ECR)
+     └─ backup run 3 hours later on regular Fargate, only if the Spot run didn't finish
+        task: secrets from Parameter Store → data/ archive from S3 → prepare → upload → summary email (SES)
+```
+
+- **Infrastructure as code:** everything is in `infra/` (Terraform): S3 (versioned, encrypted, private), ECR,
+  ECS cluster with Fargate + Fargate Spot, two schedules, SES, least-privilege IAM roles, a $10 budget alert,
+  and GitHub OIDC for deploys (no AWS keys stored in GitHub).
+- **CI/CD:** `.github/workflows/deploy.yml` runs the tests on every push to `main`; if they pass, it builds the
+  image and pushes it to ECR. The next run uses it.
+- **Shared state:** `data/` travels as one archive in S3; a lock object (S3 conditional write) keeps the cloud run
+  and `apply` from changing it at the same time. `apply` downloads before and uploads after automatically.
+- **Spot interruptions:** the run saves on AWS's 2-minute warning, and the rerun collects Claude batches already
+  submitted instead of paying for them twice.
+- **Cost:** about $1.30/month for AWS (Spot), plus Claude.
+
+Setup: `cd infra && terraform apply`, add `APPLYPILOT_BUCKET` to `.env`, then
+`python -m jobagent cloud-secrets` and `python -m jobagent cloud-push`. Re-run `cloud-secrets` after `gmail-login`.
+
 ## Your data stays local
 
-`data/` (profile, master resume, answers, Gmail token, database), `output/` (resumes and letters),
+`data/` (profile, master resume, answers, Gmail token, database; with AWS enabled, also your private S3 bucket), `output/` (resumes and letters),
 `tracker.xlsx`, `logs/`, `browser_profile/` and `.env` are git-ignored and never leave your machine except
 for the Claude API calls that read job postings and write documents.
 

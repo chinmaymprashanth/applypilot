@@ -1,0 +1,4 @@
+# Copy to terraform.tfvars (git-ignored) and fill in.
+email    = "you@example.com"
+timezone = "Asia/Kolkata"
+run_hour = 7

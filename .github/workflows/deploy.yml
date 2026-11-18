@@ -1,0 +1,47 @@
+# On every push to main: run the tests; if they pass, build the Docker image and push it to AWS ECR.
+# The next daily run uses it automatically (the task always starts ":latest").
+name: test-and-deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  id-token: write # lets the job ask GitHub for the signed OIDC token AWS checks
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen
+      - run: uv run playwright install --with-deps chromium
+      - run: uv run pytest -q
+
+  deploy:
+    needs: test # a failing test stops here; AWS keeps running the last good image
+    if: vars.AWS_DEPLOY_ROLE != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+      - name: Build and push
+        env:
+          REPO: ${{ steps.ecr.outputs.registry }}/applypilot
+        run: |
+          VERSION="${GITHUB_SHA::7}"
+          docker build --build-arg APP_VERSION="$VERSION" -t "$REPO:$VERSION" -t "$REPO:latest" .
+          docker push "$REPO:$VERSION"
+          docker push "$REPO:latest"
+          echo "Deployed version $VERSION" >> "$GITHUB_STEP_SUMMARY"

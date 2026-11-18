@@ -25,6 +25,29 @@ class LLMError(RuntimeError):
     pass
 
 
+class OutOfCredits(LLMError):
+    """The Anthropic account has no credit left: every further call would fail the same way."""
+
+
+CREDITS_HELP = ("Your Anthropic credit balance is used up, so Claude can't read jobs or write resumes. "
+                "Add credits at console.anthropic.com (Billing), then run the command again.")
+
+
+def is_out_of_credits(e: BaseException) -> bool:
+    return isinstance(e, OutOfCredits) or "credit balance is too low" in str(e)
+
+
+def guard_credits(call):
+    """Run one API call; an out-of-credits error is flagged on the meter and raised as OutOfCredits."""
+    try:
+        return call()
+    except anthropic.APIStatusError as e:
+        if is_out_of_credits(e):
+            METER.out_of_credits = True
+            raise OutOfCredits(CREDITS_HELP) from e
+        raise
+
+
 # ---- cost meter ----------------------------------------------------------------
 # Every response carries a usage "receipt" (tokens read and written). The meter prices those receipts per step
 # so the daily summary can show what each part of the run cost.
@@ -42,6 +65,7 @@ class CostMeter:
     def __init__(self):
         self._lock = threading.Lock()
         self.dollars: dict[str, float] = {}
+        self.out_of_credits = False  # set by guard_credits; reported at the end of prepare and apply
 
     def record(self, step: str, model: str, usage, batch: bool = False) -> float:
         inp, out, read, write = PRICES.get(model, PRICES["claude-sonnet-5-5"])
@@ -80,6 +104,18 @@ def make_client(api_key: str | None) -> anthropic.Anthropic:
     return anthropic.Anthropic(api_key=api_key)
 
 
+def has_credits(client: anthropic.Anthropic, model: str = "claude-haiku-5-5") -> bool:
+    """A one-token call (a tiny fraction of a cent) to learn up front whether the account can be used."""
+    try:
+        guard_credits(lambda: client.messages.create(
+            model=model, max_tokens=1, messages=[{"role": "user", "content": "ok"}]))
+    except OutOfCredits:
+        return False
+    except anthropic.APIError:
+        return True  # some other hiccup: let the real calls try (and report) as usual
+    return True
+
+
 def parse(
     client: anthropic.Anthropic,
     *,
@@ -94,16 +130,15 @@ def parse(
 ) -> T:
     # A cached system prompt is billed at a fraction of the price when the next call reuses it.
     sys_param = [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}] if cache_system else system
-    response = client.beta.messages.parse(
+    response = guard_credits(lambda: client.beta.messages.parse(
         model=model,
         max_tokens=max_tokens,
         system=sys_param,
         messages=[{"role": "user", "content": content}],
         output_format=schema,
         output_config={"effort": effort},
-        betas=[FALLBACK_BETA],
-        fallbacks="default",
-    )
+        **_model_kwargs(model),
+    ))
     if response.stop_reason == "refusal":
         raise LLMError("The model declined this request.")
     if response.stop_reason == "max_tokens":
@@ -115,7 +150,13 @@ def parse(
     return response.parsed_output
 
 
-WEB_SEARCH = "web_search_20260209"
+WEB_SEARCH = "web_search_20260209"      # with dynamic filtering: Sonnet / Opus
+WEB_SEARCH_BASIC = "web_search_20250305"  # Haiku
+
+
+def _model_kwargs(model: str) -> dict:
+    """Haiku has no server-side fallback model, so the fallback beta is only sent for other models."""
+    return {} if "haiku" in model else {"betas": [FALLBACK_BETA], "fallbacks": "default"}
 
 
 def parse_with_search(
@@ -137,17 +178,17 @@ def parse_with_search(
     messages: list[dict] = [{"role": "user", "content": content}]
     results: list[dict] = []
     for _ in range(5):  # the server pauses long search loops; resend to let it continue
-        response = client.beta.messages.parse(
+        response = guard_credits(lambda: client.beta.messages.parse(
             model=model,
             max_tokens=max_tokens,
             system=system,
             messages=messages,
-            tools=[{"type": WEB_SEARCH, "name": "web_search", "max_uses": max_searches}],
+            tools=[{"type": WEB_SEARCH_BASIC if "haiku" in model else WEB_SEARCH, "name": "web_search",
+                    "max_uses": max_searches}],
             output_format=schema,
             output_config={"effort": effort},
-            betas=[FALLBACK_BETA],
-            fallbacks="default",
-        )
+            **_model_kwargs(model),
+        ))
         METER.record(step, model, response.usage)
         # Search results can arrive as web_search_tool_result blocks or, when Claude filters pages with code
         # first, inside other tool-result blocks; collect every URL the tools returned, wherever it appears.

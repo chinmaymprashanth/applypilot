@@ -16,7 +16,7 @@ def A(**over):
 
 def _tracker(tmp_path):
     t = Tracker(tmp_path / "t.xlsx", tmp_path / "jobs")
-    for i, title in enumerate(["Software Engineer", "Data Analyst", "Backend Engineer", "Platform Engineer"]):
+    for i, title in enumerate(["Software Engineer", "Data Engineer", "Backend Engineer", "Platform Engineer"]):
         t.add_job({"company": f"Co{i}", "title": title, "url": f"https://x.io/{i}", "source": "greenhouse",
                    "description": f"job{i}" + LONG})
     ids = list(t.jobs)
@@ -46,6 +46,6 @@ def test_eval_reports_missed_good_jobs_and_wrongly_kept_bad_ones(tmp_path):
     assess = lambda job, d: A()  # noqa: E731 - the careful read keeps everything it sees
     r = run_eval(t, labels, assess, screen)
     assert (r.yes, r.kept_yes, r.no) == (2, 1, 1)
-    assert r.screen_drops_of_yes == 1 and "Data Analyst" in r.missed[0]  # the cheap screen lost a good job
+    assert r.screen_drops_of_yes == 1 and "Data Engineer" in r.missed[0]  # the cheap screen lost a good job
     assert r.let_through == ["Co2 - Backend Engineer"]
     assert t.jobs[ids[2]]["status"] == "skipped"  # tracker untouched
