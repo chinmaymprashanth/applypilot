@@ -16,11 +16,13 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import socket
 import tarfile
 import tempfile
 import time
-from dataclasses import dataclass
+from contextlib import closing
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -77,14 +79,25 @@ class Store:
             self.s3 = boto3.client("s3", region_name=region())
 
     # ---- the data archive ----------------------------------------------------------------------------------
-    def remote_version(self) -> str | None:
-        """The archive's ETag (a fingerprint S3 gives every upload), or None if nothing is uploaded yet."""
+    def remote_head(self) -> tuple[str | None, str | None]:
+        """(ETag, VersionId) of the archive: a fingerprint of the upload, and the id S3 keeps it under (versioning
+        keeps old uploads, which is what lets two changed copies be merged against the one they both started from)."""
         try:
-            return self.s3.head_object(Bucket=self.bucket, Key=STATE_KEY)["ETag"]
+            head = self.s3.head_object(Bucket=self.bucket, Key=STATE_KEY)
+            return head["ETag"], head.get("VersionId")
         except Exception as e:  # noqa: BLE001
             if _status(e) == 404:
-                return None
+                return None, None
             raise
+
+    def remote_version(self) -> str | None:
+        return self.remote_head()[0]
+
+    def download_version(self, version_id: str, dest: Path) -> Path:
+        """Save one earlier upload of the archive (by its VersionId) to dest; returns dest."""
+        obj = self.s3.get_object(Bucket=self.bucket, Key=STATE_KEY, VersionId=version_id)
+        dest.write_bytes(obj["Body"].read())
+        return dest
 
     def push(self, data_dir: Path) -> str:
         """Upload data/ as one archive; returns the new version and records it as this machine's."""
@@ -96,13 +109,13 @@ class Store:
                         tar.add(path, arcname=str(rel))
             f.seek(0)
             self.s3.upload_fileobj(f, self.bucket, STATE_KEY)
-        version = self.remote_version()
-        _write_sync(data_dir, version, dirty=False)
+        version, version_id = self.remote_head()
+        _write_sync(data_dir, version, dirty=False, version_id=version_id)
         return version
 
     def pull(self, data_dir: Path) -> str | None:
         """Download the archive into data/ (files in it replace local ones). Returns its version."""
-        version = self.remote_version()
+        version, version_id = self.remote_head()
         if version is None:
             return None
         with tempfile.TemporaryFile() as f:
@@ -110,7 +123,7 @@ class Store:
             f.seek(0)
             with tarfile.open(fileobj=f, mode="r:gz") as tar:
                 tar.extractall(data_dir, filter="data")  # "data" filter: no paths outside data/, no links
-        _write_sync(data_dir, version, dirty=False)
+        _write_sync(data_dir, version, dirty=False, version_id=version_id)
         return version
 
     # ---- the lock --------------------------------------------------------------------------------------------
@@ -182,14 +195,105 @@ def read_sync(data_dir: Path) -> dict:
     return json.loads(path.read_text()) if path.exists() else {}
 
 
-def _write_sync(data_dir: Path, version: str | None, dirty: bool) -> None:
+def _write_sync(data_dir: Path, version: str | None, dirty: bool, version_id: str | None = None,
+                at: str | None = None) -> None:
     data_dir.mkdir(parents=True, exist_ok=True)
-    (data_dir / SYNC_FILE).write_text(json.dumps({"version": version, "dirty": dirty, "at": _now()}))
+    (data_dir / SYNC_FILE).write_text(json.dumps(
+        {"version": version, "version_id": version_id, "dirty": dirty, "at": at or _now()}))
 
 
 def mark_dirty(data_dir: Path) -> None:
-    """Local changes not uploaded yet (set when apply starts, cleared by push)."""
-    _write_sync(data_dir, read_sync(data_dir).get("version"), dirty=True)
+    """Local changes not uploaded yet (set by every save on the Mac, cleared by push). Keeps the record of which
+    upload this copy started from, so the next download can merge instead of overwrite."""
+    old = read_sync(data_dir)
+    if old.get("dirty"):
+        return
+    _write_sync(data_dir, old.get("version"), dirty=True, version_id=old.get("version_id"), at=old.get("at"))
+
+
+def mark_dirty_if_synced(data_dir: Path) -> None:
+    """Called after every save. Only on a machine that syncs with AWS (never inside the AWS run itself)."""
+    if os.getenv(BUCKET_ENV) and not os.getenv("ECS_CONTAINER_METADATA_URI_V4") and (data_dir / SYNC_FILE).exists():
+        mark_dirty(data_dir)
+
+
+# ---- merging two changed copies -------------------------------------------------------------------------------------
+@dataclass
+class MergeReport:
+    yours: int = 0                                  # records changed on this machine and kept through the download
+    conflicts: list[str] = field(default_factory=list)  # "company - title: field" where both sides changed it
+
+
+def read_db(path: Path) -> tuple[dict[str, dict], dict[str, dict]]:
+    """(jobs by id, boards by "ats|token") straight from a jobagent.db file."""
+    with closing(sqlite3.connect(path)) as con:
+        jobs = {jid: json.loads(d) for jid, d in con.execute("SELECT id, data FROM jobs")}
+        boards = {f"{a}|{t}": json.loads(d) for a, t, d in con.execute("SELECT ats, token, data FROM boards")}
+    return jobs, boards
+
+
+def write_db(path: Path, jobs: dict[str, dict], boards: dict[str, dict]) -> None:
+    with closing(sqlite3.connect(path)) as con, con:
+        con.execute("DELETE FROM jobs")
+        con.executemany("INSERT INTO jobs VALUES (?, ?)",
+                        [(jid, json.dumps(r, default=str, ensure_ascii=False)) for jid, r in jobs.items()])
+        con.execute("DELETE FROM boards")
+        con.executemany("INSERT INTO boards VALUES (?, ?, ?)",
+                        [(*key.split("|", 1), json.dumps(b, default=str)) for key, b in boards.items()])
+
+
+def three_way(base: dict[str, dict], yours: dict[str, dict], theirs: dict[str, dict],
+              label=lambda key, r: key) -> tuple[dict[str, dict], list[str], list[str]]:
+    """Merge records field by field against the copy both sides started from (like `git merge`).
+    A field only you changed keeps your value; one only they changed keeps theirs; one both changed differently
+    keeps yours (you changed it on purpose) and is reported. Returns (merged, your changed keys, conflicts)."""
+    merged = dict(theirs)
+    changed, conflicts = [], []
+    for key, mine in yours.items():
+        start = base.get(key)
+        if mine == start:
+            continue
+        changed.append(key)
+        other = theirs.get(key)
+        if other is None or other == start:
+            merged[key] = mine                # new here, or untouched there: yours as is
+            continue
+        start = start or {}
+        out = dict(other)
+        for f in set(mine) | set(start):
+            if mine.get(f) == start.get(f):
+                continue                       # you didn't change it: theirs stands
+            if other.get(f) not in (start.get(f), mine.get(f)):
+                conflicts.append(f"{label(key, mine)}: {f}")
+            out[f] = mine.get(f)
+        merged[key] = out
+    return merged, changed, conflicts
+
+
+def pull_merging(store: Store, data_dir: Path, base_version_id: str) -> MergeReport:
+    """Download the cloud's copy without losing what changed here since the shared starting point."""
+    db = data_dir / "jobagent.db"
+    yours_jobs, yours_boards = read_db(db)
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        archive = store.download_version(base_version_id, tmp / "base.tar.gz")
+        with tarfile.open(archive, "r:gz") as tar:
+            tar.extractall(tmp / "base", members=[m for m in tar.getmembers() if m.name == "jobagent.db"],
+                           filter="data")
+        base_jobs, base_boards = read_db(tmp / "base" / "jobagent.db")
+    changed_ids = [jid for jid, r in yours_jobs.items() if r != base_jobs.get(jid)]
+    details = {jid: (data_dir / "jobs" / f"{jid}.json").read_bytes() for jid in changed_ids
+               if (data_dir / "jobs" / f"{jid}.json").exists()}
+    store.pull(data_dir)
+    theirs_jobs, theirs_boards = read_db(db)
+    label = lambda key, r: f"{(r.get('company') or '').strip()} - {r.get('title')}"  # noqa: E731
+    jobs, changed, conflicts = three_way(base_jobs, yours_jobs, theirs_jobs, label)
+    boards, _, board_conflicts = three_way(base_boards, yours_boards, theirs_boards,
+                                           lambda key, b: f"board {key}")
+    write_db(db, jobs, boards)
+    for jid, content in details.items():   # posting files of jobs you changed (e.g. the resume folder link)
+        (data_dir / "jobs" / f"{jid}.json").write_bytes(content)
+    return MergeReport(yours=len(changed), conflicts=conflicts + board_conflicts)
 
 
 def backup_local(data_dir: Path) -> Path:
@@ -248,5 +352,5 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-__all__ = ["Store", "LockHeld", "bucket_name", "owner_name", "read_sync", "mark_dirty", "backup_local",
+__all__ = ["MergeReport", "pull_merging", "three_way", "mark_dirty_if_synced", "Store", "LockHeld", "bucket_name", "owner_name", "read_sync", "mark_dirty", "backup_local",
            "put_secrets", "send_email", "wait_for_lock", "PARAM_ANTHROPIC", "PARAM_GMAIL"]

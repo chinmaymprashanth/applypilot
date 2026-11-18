@@ -191,3 +191,102 @@ def test_apply_reads_env_before_deciding_cloud_or_local(tmp_path, monkeypatch):
     except Stop:
         pass
     assert calls == ["settings", "cloud:b"]
+
+
+# ---- merging two changed copies ------------------------------------------------------------------------------------
+class VersionedS3(FakeS3):
+    """Keeps every upload, like the real bucket (versioning on)."""
+
+    def __init__(self):
+        super().__init__()
+        self.versions: dict[str, list[bytes]] = {}
+
+    def upload_fileobj(self, f, bucket, key):
+        super().upload_fileobj(f, bucket, key)
+        self.versions.setdefault(key, []).append(self.objects[key])
+
+    def head_object(self, Bucket, Key):
+        head = super().head_object(Bucket, Key)
+        return {**head, "VersionId": f"v{len(self.versions.get(Key, []))}"}
+
+    def get_object(self, Bucket, Key, VersionId=None):
+        if VersionId:
+            return {"Body": io.BytesIO(self.versions[Key][int(VersionId[1:]) - 1])}
+        return super().get_object(Bucket, Key)
+
+
+def _tracker(data):
+    from jobagent.tracker import Tracker
+
+    return Tracker(data.parent / "tracker.xlsx", data / "jobs")
+
+
+def _add(t, company, title):
+    t.add_job({"company": company, "title": title, "location": "Remote, US", "source": "greenhouse",
+               "url": f"https://boards.greenhouse.io/{company.lower()}/jobs/1", "description": "Build things.",
+               "ats_type": "greenhouse"})
+    return next(j for j, r in t.jobs.items() if r["company"] == company)
+
+
+def test_three_way_keeps_both_sides_and_reports_real_conflicts():
+    base = {"a": {"status": "shortlisted", "notes": None}, "b": {"status": "found"}}
+    yours = {"a": {"status": "applied", "notes": "phone screen"}, "b": {"status": "found"}, "n": {"status": "prepared"}}
+    theirs = {"a": {"status": "shortlisted", "notes": "auto"}, "b": {"status": "shortlisted"}}
+    merged, changed, conflicts = cloud.three_way(base, yours, theirs)
+    assert merged["a"] == {"status": "applied", "notes": "phone screen"}  # your status; notes: both changed -> yours
+    assert merged["b"] == {"status": "shortlisted"}                       # only the cloud changed it
+    assert merged["n"] == {"status": "prepared"}                          # added only here
+    assert sorted(changed) == ["a", "n"] and conflicts == ["a: notes"]
+
+
+def test_download_merges_mac_edits_with_the_cloud_run(tmp_path, monkeypatch):
+    from jobagent import cli
+
+    monkeypatch.setenv(cloud.BUCKET_ENV, "b")
+    monkeypatch.setattr(cli.typer, "echo", lambda *a, **k: None)
+    monkeypatch.setattr(cli.typer, "secho", lambda *a, **k: None)
+    s3 = VersionedS3()
+    store = cloud.Store("b", s3)
+    mac = tmp_path / "mac" / "data"
+    t = _tracker(mac)
+    a, b = _add(t, "Acme", "Engineer"), _add(t, "Beta", "Developer")
+    t.save()
+    store.push(mac)                                   # shared starting point (v1)
+
+    box = tmp_path / "cloud" / "data"                 # the AWS run: shortlists Beta, uploads v2
+    store.pull(box)
+    tc = _tracker(box)
+    tc.update(b, status="shortlisted")
+    tc.save()
+    store.push(box)
+
+    t = _tracker(mac)                                 # meanwhile on the Mac: `status` marks Acme applied,
+    t.update(a, status="applied")                     # and a job is added by hand
+    n = _add(t, "Gamma", "Analyst Engineer")
+    t.update(n, status="prepared")
+    t.save()
+    assert cloud.read_sync(mac)["dirty"]              # the save marked unsynced changes
+
+    cli._sync_down(store, mac)
+    merged = _tracker(mac).jobs
+    assert merged[a]["status"] == "applied"           # yours
+    assert merged[b]["status"] == "shortlisted"       # the cloud's
+    assert merged[n]["status"] == "prepared"          # new here
+    assert (mac / "jobs" / f"{n}.json").exists()
+    sync = cloud.read_sync(mac)
+    assert sync["dirty"] and sync["version_id"] == "v2"  # merged copy goes up next; it now starts from v2
+
+
+def test_saves_mark_unsynced_changes_only_on_a_synced_machine(tmp_path, monkeypatch):
+    mac = tmp_path / "data"
+    monkeypatch.delenv(cloud.BUCKET_ENV, raising=False)
+    _tracker(mac).save()
+    assert not (mac / cloud.SYNC_FILE).exists()           # not using AWS: nothing to mark
+    monkeypatch.setenv(cloud.BUCKET_ENV, "b")
+    cloud.Store("b", VersionedS3()).push(mac)
+    monkeypatch.setenv("ECS_CONTAINER_METADATA_URI_V4", "http://x")
+    _tracker(mac).save()
+    assert not cloud.read_sync(mac)["dirty"]              # inside the AWS run: never
+    monkeypatch.delenv("ECS_CONTAINER_METADATA_URI_V4")
+    _tracker(mac).save()
+    assert cloud.read_sync(mac)["dirty"]                  # on the Mac: yes

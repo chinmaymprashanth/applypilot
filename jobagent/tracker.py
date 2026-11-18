@@ -226,6 +226,9 @@ class Tracker:
         """Save the records, then export tracker.xlsx. Returns False if Excel had the file open (the records are
         still saved; the sheet catches up on the next save)."""
         self._save_db()
+        from .cloud import mark_dirty_if_synced
+
+        mark_dirty_if_synced(self.jobs_dir.parent)  # so the next download from AWS merges instead of overwriting
         if self._lock_file().exists():
             self.excel_stale = True
             log.warning("%s is open in Excel; your data is saved and the sheet will update next time", self.path.name)
