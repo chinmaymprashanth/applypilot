@@ -12,23 +12,26 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
 # uv, the same package manager used on the Mac, from its official image.
 COPY --from=ghcr.io/astral-sh/uv:0.13.5 /uv /usr/local/bin/uv
 
+# The app folder belongs to the image's ordinary user from the start, and everything below runs as that user.
+# (A later `chown -R` would copy every file into a new layer: it once added 448 MB to this image.)
 WORKDIR /app
-ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never PYTHONUNBUFFERED=1
+RUN chown pwuser:pwuser /app
+USER pwuser
+# UV_NO_CACHE: don't keep uv's download cache inside the image (it was another 377 MB).
+ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never UV_NO_CACHE=1 PYTHONUNBUFFERED=1
 
 # 1. Dependencies first: this layer is cached and only rebuilt when pyproject.toml / uv.lock change.
-COPY pyproject.toml uv.lock ./
+COPY --chown=pwuser:pwuser pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
 # 2. Then the code (changes often, so it comes last).
-COPY README.md ./
-COPY jobagent ./jobagent
-COPY templates ./templates
-RUN uv sync --frozen --no-dev && mkdir -p data output logs && chown -R pwuser:pwuser /app
+COPY --chown=pwuser:pwuser README.md ./
+COPY --chown=pwuser:pwuser jobagent ./jobagent
+COPY --chown=pwuser:pwuser templates ./templates
+RUN uv sync --frozen --no-dev && mkdir -p data output logs
 
 # Which commit this image was built from; shown in the daily email.
 ARG APP_VERSION=dev
 ENV APP_VERSION=${APP_VERSION} TZ=Asia/Kolkata
 
-# Run as the image's ordinary user, not root.
-USER pwuser
 ENTRYPOINT ["/app/.venv/bin/python", "-m", "jobagent", "cloud-prepare"]
