@@ -382,18 +382,27 @@ def _sync_down(store, data_dir: Path) -> None:
         return
     if remote == local.get("version"):
         return
-    if local.get("dirty"):
-        backup = cloud.backup_local(data_dir)
-        typer.secho(f"Your last apply session didn't finish uploading; a copy of it is saved at {backup}. "
-                    "Check `status` for any job you marked as submitted then.", fg="yellow")
     mine = cloud.edited_since_sync(data_dir)  # e.g. a master resume you just edited
-    typer.echo("Downloading today's results from AWS...")
-    store.pull(data_dir)
+    merged = False
+    if local.get("dirty") and local.get("version_id") and (data_dir / "jobagent.db").exists():
+        typer.echo("Downloading today's results from AWS and merging in your changes from this Mac...")
+        report = cloud.pull_merging(store, data_dir, local["version_id"])
+        merged = True
+        typer.echo(f"  kept {report.yours} job record(s) you changed here")
+        for c in report.conflicts[:10]:
+            typer.secho(f"  both sides changed {c}; kept yours", fg="yellow")
+    else:
+        if local.get("dirty"):  # changed here, but no record of the shared starting point: keep a copy
+            backup = cloud.backup_local(data_dir)
+            typer.secho(f"Local changes couldn't be merged automatically; a copy is saved at {backup}.",
+                        fg="yellow")
+        typer.echo("Downloading today's results from AWS...")
+        store.pull(data_dir)
     for name, content in mine.items():
         (data_dir / name).write_bytes(content)
         typer.echo(f"  kept your edited {name} (it goes up to AWS when you finish)")
-    if mine:
-        cloud.mark_dirty(data_dir)
+    if mine or merged:
+        cloud.mark_dirty(data_dir)  # uploaded when apply finishes (or with cloud-push)
 
 
 def _apply_local(limit: int | None) -> None:
