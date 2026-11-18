@@ -157,6 +157,21 @@ class Store:
             raise
 
 
+def emergency_stop(store: "Store", data_dir: Path, pulled: bool, locked: bool, exit=os._exit) -> None:
+    """AWS is stopping the task (Spot taking the computer back, or a manual stop): it gets SIGTERM and then, after
+    the task's stop timeout, a hard kill. Waiting for the run's helper threads can take longer than that, so save
+    straight away: upload the data as last saved on disk, release the lock, and exit."""
+    try:
+        if pulled:  # only data that started from your real copy is ever uploaded
+            store.push(data_dir)
+    finally:
+        try:
+            if locked:
+                store.unlock()
+        finally:
+            exit(143)
+
+
 def owner_name() -> str:
     return "the AWS daily run" if os.getenv("ECS_CONTAINER_METADATA_URI_V4") else f"apply on {socket.gethostname()}"
 

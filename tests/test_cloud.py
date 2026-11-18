@@ -135,3 +135,29 @@ def test_your_edited_resume_survives_a_download(tmp_path, monkeypatch):
     assert (mac / "jobagent.db").read_text() == "db after the cloud run"
     assert (mac / "master_resume.yaml").read_text() == "resume with the AWS bullet"
     assert cloud.read_sync(mac)["dirty"]                    # so apply uploads it when it finishes
+
+
+def test_emergency_stop_uploads_and_releases_the_lock(tmp_path):
+    s3 = FakeS3()
+    data = _data(tmp_path)
+    store = cloud.Store("b", s3)
+    store.lock("the AWS daily run")
+    (data / "jobagent.db").write_text("db saved mid-run")
+    exits = []
+    cloud.emergency_stop(store, data, pulled=True, locked=True, exit=exits.append)
+    assert exits == [143]
+    assert cloud.LOCK_KEY not in s3.objects            # apply isn't blocked for hours
+    restored = tmp_path / "restored" / "data"
+    store.pull(restored)
+    assert (restored / "jobagent.db").read_text() == "db saved mid-run"
+
+
+def test_emergency_stop_before_download_or_lock_touches_nothing(tmp_path):
+    s3 = FakeS3()
+    store = cloud.Store("b", s3)
+    store.lock("apply on mac")                          # someone else holds it; we were still waiting
+    exits = []
+    cloud.emergency_stop(store, _data(tmp_path), pulled=False, locked=False, exit=exits.append)
+    assert exits == [143]
+    assert cloud.STATE_KEY not in s3.objects            # an empty container never uploads
+    assert store.lock_holder()["owner"] == "apply on mac"  # and never frees a lock it doesn't hold

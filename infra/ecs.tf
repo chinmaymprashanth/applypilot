@@ -40,6 +40,9 @@ locals {
     name      = local.name
     image     = "${aws_ecr_repository.app.repository_url}:latest"
     essential = true
+    # Seconds between "please stop" (SIGTERM) and a hard kill. 120 is Fargate's maximum and matches Spot's
+    # two-minute warning, so the run has time to upload its data and release the lock.
+    stopTimeout = 120
     environment = [
       { name = "APPLYPILOT_BUCKET", value = aws_s3_bucket.state.id },
       { name = "SUMMARY_EMAIL", value = var.email },

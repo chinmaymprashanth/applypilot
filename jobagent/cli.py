@@ -680,26 +680,30 @@ def cloud_prepare(backup: bool = typer.Option(False, help="The 9:30 backup run: 
             cloud.send_email(email, f"ApplyPilot {today}: not run, Claude credits are out", CREDITS_HELP)
         raise typer.Exit(1)
 
-    def stop(signum, frame):  # Spot: AWS wants the computer back (2 minutes' notice)
-        raise SystemExit(143)
+    held = {"locked": False, "pulled": False}
+
+    def stop(signum, frame):  # Spot or a manual stop: save and leave within the stop timeout (see emergency_stop)
+        typer.echo("AWS is stopping this run: uploading what's saved and releasing the lock.")
+        cloud.emergency_stop(store, s.data_dir, held["pulled"], held["locked"])
 
     signal.signal(signal.SIGTERM, stop)
     cloud.wait_for_lock(store, cloud.owner_name(), minutes=90, echo=typer.echo)
+    held["locked"] = True
+    if backup and store.exists(done_key):  # today's run finished while the backup waited for the lock
+        store.unlock()
+        typer.echo("Today's run finished while the backup was waiting; nothing to do.")
+        return
     outcome, text, pulled = "failed", "", False
     try:
         if store.pull(s.data_dir) is None:
             raise RuntimeError("No data in S3 yet: run `python -m jobagent cloud-push` on your Mac first.")
-        pulled = True
+        pulled = held["pulled"] = True
         if os.getenv("GMAIL_TOKEN"):
             (s.data_dir / "gmail_token.json").write_text(os.environ["GMAIL_TOKEN"])
         text = prepare()
         store.put_text(f"summaries/{today}.md", text)
         store.put_text(done_key, version)
         outcome = "ok"
-    except SystemExit as e:
-        if e.code == 143:
-            outcome = "interrupted"
-        raise
     except BaseException:
         text = traceback.format_exc()[-3000:]
         raise
@@ -709,7 +713,7 @@ def cloud_prepare(backup: bool = typer.Option(False, help="The 9:30 backup run: 
                 store.push(s.data_dir)
         finally:
             store.unlock()
-        if email and outcome != "interrupted":  # an interrupted run is finished by the backup run
+        if email:  # (an interrupted run never gets here: emergency_stop exits, and the backup run finishes the day)
             subject = f"ApplyPilot {today}: " + ("your daily picks" if outcome == "ok" else "the daily run failed")
             cloud.send_email(email, subject, f"(ApplyPilot version {version}, run in AWS)\n\n{text}")
 
