@@ -291,3 +291,20 @@ def test_search_urls_are_found_in_any_tool_result_shape():
                                                                           "and https://acme.com/blog/ai)."},
               "extra": [{"url": "https://sec.gov/x"}]}
     assert sorted(_urls(nested)) == ["https://acme.com/blog/ai", "https://acme.com/news/1", "https://sec.gov/x"]
+
+
+def test_trimming_protects_the_most_recent_role():
+    from jobagent.tailor.render import trim_once
+
+    data = {"achievements": [], "education": [{"notes": ["x"]}],
+            "experience": [{"bullets": ["i1", "i2", "i3", "i4"]}, {"bullets": ["c1", "c2"]}, {"bullets": ["g1"]}],
+            "projects": [{"bullets": ["a1", "a2", "a3"]}, {"bullets": ["b1"]}]}
+    order = []
+    while trim_once(data):
+        order.append((len(data["experience"][0]["bullets"]), len(data["experience"][1]["bullets"]),
+                      len(data["projects"])))
+    # Older role first (to 1 bullet), then the extra project, then the main project (to 2), and the latest
+    # role last, never below 3.
+    assert order[:2] == [(4, 1, 2), (4, 1, 1)]
+    assert data["projects"][0]["bullets"] == ["a1", "a2"] and data["experience"][0]["bullets"] == ["i1", "i2", "i3"]
+    assert order.index((3, 1, 1)) > order.index((4, 1, 1))
