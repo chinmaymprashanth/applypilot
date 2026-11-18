@@ -8,6 +8,7 @@ Endpoints checked against live responses on 2026-11-11.
 from __future__ import annotations
 
 import re
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 
@@ -136,6 +137,22 @@ def fetch_ashby(
 
 WORKDAY_JOBS = "https://{host}/wday/cxs/{tenant}/{site}/jobs"
 WORKDAY_PAGES = 10  # at most 200 newest postings per site per day
+WORKDAY_TRIES = 4  # Workday answers "429 slow down" readily, especially to cloud (data-center) addresses
+
+
+def _workday(client: httpx.Client, method: str, url: str, **kw) -> httpx.Response:
+    """One Workday request; on "429 slow down", wait as asked (or a few seconds, growing) and retry just this
+    request, instead of abandoning the site and starting it over later. Other errors are raised as usual."""
+    for attempt in range(WORKDAY_TRIES):
+        r = client.request(method, url, headers={"Accept": "application/json"}, **kw)
+        if r.status_code != 429 or attempt == WORKDAY_TRIES - 1:
+            return r
+        try:
+            wait = float(r.headers.get("retry-after") or 0)
+        except ValueError:
+            wait = 0
+        time.sleep(min(wait or 3 * (attempt + 1), 30))
+    return r
 
 
 def posted_days(text: str | None) -> int | None:
@@ -158,8 +175,8 @@ def fetch_workday(
     url = WORKDAY_JOBS.format(host=host, tenant=tenant, site=site)
     out = []
     for page in range(WORKDAY_PAGES):
-        r = client.post(url, json={"appliedFacets": {}, "limit": 20, "offset": page * 20, "searchText": ""},
-                        headers={"Accept": "application/json"})
+        r = _workday(client, "POST", url,
+                     json={"appliedFacets": {}, "limit": 20, "offset": page * 20, "searchText": ""})
         if r.status_code in (404, 410) and page == 0:
             raise BoardNotFound(url)  # gone for good; a 422 or 5xx counts as a failure and is retried 3 days
         r.raise_for_status()
@@ -182,8 +199,9 @@ def fetch_workday(
                 apply_url=f"https://{host}/{site}{path}", ats_type="workday",
             )
             if not (skip and skip(job)):
-                info = client.get(f"https://{host}/wday/cxs/{tenant}/{site}{path}",
-                                  headers={"Accept": "application/json"}).json().get("jobPostingInfo") or {}
+                detail = _workday(client, "GET", f"https://{host}/wday/cxs/{tenant}/{site}{path}")
+                detail.raise_for_status()  # a final 429 is "slow down", never misread as broken data
+                info = detail.json().get("jobPostingInfo") or {}
                 country = (info.get("country") or {}).get("descriptor")
                 in_us = country in ("United States of America", "United States") if country else \
                     is_us(info.get("location") or where)

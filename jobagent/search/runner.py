@@ -38,7 +38,8 @@ MAX_FAILURES = 3
 
 
 # How many sites of a throttling service are checked at the same time.
-PER_SERVICE = {"workable": 2, "smartrecruiters": 4, "eightfold": 1, "amazon": 1}
+# Workday: most companies share a few servers (wd1, wd3, wd5), which throttle cloud addresses hard.
+PER_SERVICE = {"workable": 2, "smartrecruiters": 4, "eightfold": 1, "amazon": 1, "workday": 4}
 TEMPORARY = ("network", "timeout", "slow down", "server error")
 
 
@@ -215,11 +216,13 @@ def run_search(
             gate = gates.get(b["ats_type"])
             for attempt in range(3):
                 try:
-                    if gate:
-                        with gate:
+                    jobs = finder.boards.get(key)  # already fetched earlier in this run
+                    if jobs is None:
+                        if gate:
+                            with gate:
+                                jobs = FETCHERS[b["ats_type"]](client, b["token"], since=since, skip=skip)
+                        else:
                             jobs = FETCHERS[b["ats_type"]](client, b["token"], since=since, skip=skip)
-                    else:
-                        jobs = finder.boards.get(key) or FETCHERS[b["ats_type"]](client, b["token"], since=since, skip=skip)
                     return b, jobs, None
                 except httpx.HTTPStatusError as e:
                     if e.response.status_code != 429 or attempt == 2:

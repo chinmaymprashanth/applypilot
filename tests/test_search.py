@@ -302,3 +302,44 @@ def test_slow_down_is_waited_out_and_retried(tmp_path, monkeypatch):
 
     report = run_search(load_settings(tmp_path), t, client=httpx.Client(transport=httpx.MockTransport(handler)), now=NOW)
     assert len(calls) == 2 and report.boards_polled == 1 and not report.hiccups
+
+
+def test_workday_slow_down_is_retried_per_request(monkeypatch):
+    """A 429 on a list page or a job page waits and retries that request; the site isn't abandoned."""
+    from jobagent.search import ats
+
+    monkeypatch.setattr(ats.time, "sleep", lambda s: None)
+    answers = {"https://acme.wd5.myworkdayjobs.com/wday/cxs/acme/careers/jobs": WD_LIST,
+               "https://acme.wd5.myworkdayjobs.com/wday/cxs/acme/careers/job/Austin/Software": WD_DETAIL}
+    seen: dict[str, int] = {}
+
+    def handler(request):
+        url = str(request.url).split("?")[0]
+        seen[url] = seen.get(url, 0) + 1
+        if seen[url] == 1:  # every URL says "slow down" once
+            return httpx.Response(429, headers={"retry-after": "1"}, text="Too Many Requests")
+        for prefix, body in answers.items():
+            if url.startswith(prefix):
+                return httpx.Response(200, json=body)
+        return httpx.Response(404)
+
+    c = httpx.Client(transport=httpx.MockTransport(handler))
+    jobs = ats.fetch_workday(c, "acme.wd5.myworkdayjobs.com|acme|careers", since=NOW - timedelta(days=7))
+    assert [j["title"] for j in jobs] == ["Software Engineer"] and jobs[0]["description"] == "Build APIs"
+
+
+def test_workday_detail_that_stays_throttled_is_a_slow_down_not_bad_data(monkeypatch):
+    from jobagent.search import ats
+    from jobagent.search.runner import error_kind
+
+    monkeypatch.setattr(ats.time, "sleep", lambda s: None)
+
+    def handler(request):
+        if str(request.url).endswith("/jobs"):
+            return httpx.Response(200, json=WD_LIST)
+        return httpx.Response(429, text="Too Many Requests")
+
+    c = httpx.Client(transport=httpx.MockTransport(handler))
+    with pytest.raises(httpx.HTTPStatusError) as e:
+        ats.fetch_workday(c, "acme.wd5.myworkdayjobs.com|acme|careers", since=NOW - timedelta(days=7))
+    assert error_kind(e.value) == "slow down"  # doesn't count against the site
