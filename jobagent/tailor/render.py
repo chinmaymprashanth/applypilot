@@ -69,7 +69,7 @@ def trim_once(data: dict) -> bool:
         data["achievements"] = []
         return True
     projects = data["projects"]
-    if projects:
+    if len(projects) > 1:  # extra projects shrink first; the main (first) project is handled below
         last = projects[-1]
         if len(last["bullets"]) > 1:
             last["bullets"].pop()
@@ -77,10 +77,20 @@ def trim_once(data: dict) -> bool:
         if len(projects) > 2:
             projects.pop()
             return True
-    for e in reversed(data["experience"]):  # oldest roles first
-        if len(e["bullets"]) > 2:
+    # The most recent role carries the most weight: older roles go down to one bullet first (oldest first).
+    for e in reversed(data["experience"][1:]):
+        if len(e["bullets"]) > 1:
             e["bullets"].pop()
             return True
+    if len(projects) > 1:
+        projects.pop()
+        return True
+    if projects and len(projects[0]["bullets"]) > 2:  # the main project keeps at least two bullets
+        projects[0]["bullets"].pop()
+        return True
+    if data["experience"] and len(data["experience"][0]["bullets"]) > 3:  # never below 3 for the latest role
+        data["experience"][0]["bullets"].pop()
+        return True
     for ed in data["education"]:
         if ed["notes"]:
             ed["notes"] = []

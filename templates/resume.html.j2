@@ -47,7 +47,7 @@
 <h2>Projects</h2>
 {% for e in projects %}
 <div class="entry">
-  <div><span class="what">{{ e.name }}</span>{% if e.tech %}<span class="meta"> | {{ e.tech | join(", ") }}</span>{% endif %}{% if e.link %}<span class="meta"> | </span><a href="{{ e.link }}">Live Demo</a>{% endif %}</div>
+  <div><span class="what">{{ e.name }}</span>{% if e.tech %}<span class="meta"> | {{ e.tech | join(", ") }}</span>{% endif %}{% if e.link %}<span class="meta"> | </span><a href="{{ e.link }}">{{ "GitHub" if "github.com" in e.link else "Live Demo" }}</a>{% endif %}</div>
   <ul>{% for b in e.bullets %}<li>{{ b }}</li>{% endfor %}</ul>
 </div>
 {% endfor %}

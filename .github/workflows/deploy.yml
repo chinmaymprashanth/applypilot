@@ -1,8 +1,11 @@
+# On every pull request into main: run the tests, so a PR shows pass/fail before it's merged.
 # On every push to main: run the tests; if they pass, build the Docker image and push it to AWS ECR.
 # The next daily run uses it automatically (the task always starts ":latest").
 name: test-and-deploy
 
 on:
+  pull_request:
+    branches: [main]
   push:
     branches: [main]
   workflow_dispatch: {}
@@ -26,7 +29,9 @@ jobs:
 
   deploy:
     needs: test # a failing test stops here; AWS keeps running the last good image
-    if: vars.AWS_DEPLOY_ROLE != ''
+    # Only code that has landed on main is deployed; pull requests stop after the tests.
+    # (AWS also refuses any branch but main: the deploy role's trust rule names refs/heads/main.)
+    if: github.event_name != 'pull_request' && vars.AWS_DEPLOY_ROLE != ''
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
