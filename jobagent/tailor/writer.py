@@ -144,8 +144,14 @@ How to tailor (to pass ATS keyword screens and read well to a human):
   Never use a term the master lines don't support. Work each term in as natural English, the way a
   person would write it ("an LLM chatbot", "relational database queries"), never as a bolted-on
   parenthetical tag like "PostgreSQL (relational databases)".
+- Relevance: include only what this job requires or what directly supports its core duties. Leave out
+  optional extras ("a plus", "nice to have") and personal details. Mention spoken languages only if the
+  posting requires a specific language. The summary covers only the role's core requirements.
 - Lead each bullet with a strong verb and keep the original metric. Max 4 bullets per role,
   3 per project, about 25 words each.
+- The most recent full-time role carries the most weight: keep the full substance of its master bullets,
+  including the effect of each result (e.g. "ensuring uninterrupted business operations"). Trim other
+  roles and projects first.
 - Show every role the record lists (the timeline must be complete); trim weaker bullets of less
   relevant roles instead of dropping them.
 - Pick the 2 to 4 projects that best match the job.
@@ -165,6 +171,8 @@ Cover letter (150 to 220 words). It should make a recruiter want to keep reading
   Facts about the company may only come from the research.
 - Then connect it to one real result of the candidate (IBM or a project) with its number, and offer one
   concrete idea of what they would build, analyze or improve in this role in the first months.
+- Describe projects in plain words a non-engineer would understand: what it does and why it matters, not
+  how its internals work.
 - Direct, specific and natural, like a person wrote it. No "passionate", "dynamic team", "I am excited
   to apply", "fast-paced", "leverage", "synergy" or similar filler.
 - Greeting "Dear Hiring Team," and sign off with the candidate's name: {name}
