@@ -161,3 +161,33 @@ def test_emergency_stop_before_download_or_lock_touches_nothing(tmp_path):
     assert exits == [143]
     assert cloud.STATE_KEY not in s3.objects            # an empty container never uploads
     assert store.lock_holder()["owner"] == "apply on mac"  # and never frees a lock it doesn't hold
+
+
+def test_apply_reads_env_before_deciding_cloud_or_local(tmp_path, monkeypatch):
+    """APPLYPILOT_BUCKET set only in .env must still switch apply to cloud mode."""
+    from jobagent import cli
+
+    monkeypatch.delenv("APPLYPILOT_BUCKET", raising=False)
+    calls = []
+
+    def fake_settings(*a, **k):
+        monkeypatch.setenv("APPLYPILOT_BUCKET", "b")  # what load_dotenv does
+        calls.append("settings")
+        return type("S", (), {"data_dir": tmp_path / "data"})()
+
+    monkeypatch.setattr(cli, "load_settings", fake_settings)
+    monkeypatch.setattr(cli, "_apply_local", lambda limit: calls.append("local"))
+
+    class Stop(Exception):
+        pass
+
+    def store(bucket, s3=None):
+        calls.append(f"cloud:{bucket}")
+        raise Stop()
+
+    monkeypatch.setattr(cloud, "Store", store)
+    try:
+        cli._apply(None)
+    except Stop:
+        pass
+    assert calls == ["settings", "cloud:b"]

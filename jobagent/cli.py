@@ -345,10 +345,10 @@ def rerender() -> None:
 def _apply(limit: int | None) -> None:
     from . import cloud
 
+    s = load_settings()  # reads .env first: APPLYPILOT_BUCKET lives there
     bucket = cloud.bucket_name()
     if not bucket:
         return _apply_local(limit)
-    s = load_settings()
     store = cloud.Store(bucket)
     try:
         store.lock(cloud.owner_name())
