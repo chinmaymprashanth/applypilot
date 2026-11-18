@@ -10,6 +10,9 @@ from jobagent.profile import (
 )
 
 ROOT = Path(__file__).resolve().parent.parent
+# Your own profile lives in data/ (git-ignored), so it isn't there on GitHub's test machines.
+needs_personal_data = pytest.mark.skipif(not (ROOT / "data" / "profile.yaml").exists(),
+                                         reason="personal data/ not present (e.g. in CI)")
 
 RESUME = {
     "experience": [
@@ -22,6 +25,7 @@ RESUME = {
 }
 
 
+@needs_personal_data
 def test_shipped_profile_loads_with_ibm_dates():
     p = load_profile(ROOT / "data" / "profile.yaml")
     assert p.us_citizen and not p.needs_sponsorship
@@ -29,6 +33,7 @@ def test_shipped_profile_loads_with_ibm_dates():
     assert (ibm.company, ibm.start, ibm.end) == ("IBM", "2025-09", "2026-10")
 
 
+@needs_personal_data
 def test_fixed_dates_override_pdf_dates():
     r = MasterResume.model_validate(RESUME)
     p = load_profile(ROOT / "data" / "profile.yaml")
