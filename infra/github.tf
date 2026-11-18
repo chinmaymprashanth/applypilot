@@ -7,6 +7,12 @@ variable "github_repo" {
   default     = "chinmaymprashanth/applypilot"
 }
 
+variable "github_repo_immutable" {
+  description = "The same repository with GitHub's permanent ids (owner@id/name@id), used in newer OIDC tokens"
+  type        = string
+  default     = "chinmaymprashanth@221058622/applypilot@1460085782"
+}
+
 resource "aws_iam_openid_connect_provider" "github" {
   url            = "https://token.actions.githubusercontent.com"
   client_id_list = ["sts.amazonaws.com"]
@@ -24,7 +30,11 @@ resource "aws_iam_role" "deploy" {
         StringEquals = {
           "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
           # Only pushes to main of this one repository; forks and pull requests can't deploy.
-          "token.actions.githubusercontent.com:sub" = "repo:${var.github_repo}:ref:refs/heads/main"
+          # GitHub's newer tokens name the repo with permanent ids, so a renamed or re-created repo can't match.
+          "token.actions.githubusercontent.com:sub" = [
+            "repo:${var.github_repo_immutable}:ref:refs/heads/main",
+            "repo:${var.github_repo}:ref:refs/heads/main",
+          ]
         }
       }
     }]
