@@ -146,6 +146,8 @@ def search() -> None:
         f"New-grad list: {report.newgrad_listings} recent US tech roles. Alert emails read: {report.emails_read}. "
         f"Skipped {report.stale} older than {s.max_age_days} days."
     )
+    if report.slow_lane:
+        typer.echo("Workday slow lane: " + ", ".join(f"{n} {k}" for k, n in report.slow_lane.items()))
     if report.hiccups:
         reasons = {"network": "internet connection blips (not counted against the site)",
                    "timeout": "slow sites (not counted against the site)",

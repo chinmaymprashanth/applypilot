@@ -7,7 +7,9 @@ Endpoints checked against live responses on 2026-11-11.
 
 from __future__ import annotations
 
+import os
 import re
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Callable
@@ -140,10 +142,27 @@ WORKDAY_PAGES = 10  # at most 200 newest postings per site per day
 WORKDAY_TRIES = 2  # one polite retry per request; a server that keeps saying "slow down" is left for the next run
 
 
+# Workday's slow lane: at least this many seconds between any two Workday requests (all servers together).
+# Workday throttles cloud addresses hard; asking slowly may be answered where asking fast is refused.
+WORKDAY_MIN_INTERVAL = float(os.getenv("WORKDAY_MIN_INTERVAL", "1.5"))
+_pace_lock = threading.Lock()
+_last_request = [0.0]
+
+
+def _pace() -> None:
+    """Wait until WORKDAY_MIN_INTERVAL has passed since the previous Workday request."""
+    with _pace_lock:
+        wait = _last_request[0] + WORKDAY_MIN_INTERVAL - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+        _last_request[0] = time.monotonic()
+
+
 def _workday(client: httpx.Client, method: str, url: str, **kw) -> httpx.Response:
-    """One Workday request; on "429 slow down", wait as asked (or a few seconds, growing) and retry just this
-    request, instead of abandoning the site and starting it over later. Other errors are raised as usual."""
+    """One Workday request, paced; on "429 slow down", wait as asked (or a few seconds) and retry it once.
+    Other errors are raised as usual."""
     for attempt in range(WORKDAY_TRIES):
+        _pace()
         r = client.request(method, url, headers={"Accept": "application/json"}, **kw)
         if r.status_code != 429 or attempt == WORKDAY_TRIES - 1:
             return r

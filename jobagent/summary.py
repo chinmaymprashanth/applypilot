@@ -51,6 +51,11 @@ def build_summary(tracker: Tracker, search=None, funnel=None, tailored=None, inb
                 f"- New-grad list: {search.newgrad_listings} recent roles; internship list: "
                 f"{search.intern_listings}; alert emails read: {search.emails_read}",
                 f"- Skipped as older than {max_age_days} days: {search.stale}"]
+        lane = getattr(search, "slow_lane", None)
+        if lane:
+            out.append(f"- Workday slow lane (one site at a time): {lane['checked']} sites checked, "
+                       f"{lane['jobs']} new US tech jobs, {lane['throttled']} throttled, "
+                       f"{lane['left for next run']} left for the next run")
         if search.hiccups:
             out.append("- Sites that couldn't be checked today (tried again tomorrow): "
                        + ", ".join(f"{n} {kind}" for kind, n in sorted(search.hiccups.items(), key=lambda kv: -kv[1])))

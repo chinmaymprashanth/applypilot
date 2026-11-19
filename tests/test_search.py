@@ -380,3 +380,39 @@ def test_search_stops_starting_sites_when_its_time_budget_is_used(tmp_path):
     report = run_search(load_settings(tmp_path), tracker, client=c, now=NOW, budget_minutes=-1)  # already over
     assert report.hiccups == {"left for the next run": 1} and report.boards_polled == 0
     assert tracker.boards[("workday", "acme.wd5.myworkdayjobs.com|acme|careers")]["failures"] == 0
+
+
+def test_workday_requests_are_paced(monkeypatch):
+    """The slow lane: at least WORKDAY_MIN_INTERVAL seconds between any two Workday requests."""
+    from jobagent.search import ats
+
+    clock = {"t": 100.0}
+    slept = []
+    monkeypatch.setattr(ats, "WORKDAY_MIN_INTERVAL", 1.5)
+    monkeypatch.setattr(ats, "_last_request", [0.0])
+    monkeypatch.setattr(ats.time, "monotonic", lambda: clock["t"])
+
+    def sleep(s):
+        slept.append(round(s, 2))
+        clock["t"] += s
+
+    monkeypatch.setattr(ats.time, "sleep", sleep)
+    c = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, json={})))
+    for _ in range(3):
+        ats._workday(c, "GET", "https://acme.wd5.myworkdayjobs.com/x")
+        clock["t"] += 0.5          # the request itself took half a second
+    assert slept == [1.0, 1.0]     # first request immediately; then wait out the rest of each 1.5 s
+
+
+def test_workday_runs_in_its_own_lane_and_is_reported(tmp_path):
+    tracker = Tracker(tmp_path / "t.xlsx", tmp_path / "jobs")
+    tracker.add_board("workday", "acme.wd5.myworkdayjobs.com|acme|careers")
+    tracker.add_board("workday", "beta.wd1.myworkdayjobs.com|beta|careers")
+    c = _mock({"https://acme.wd5.myworkdayjobs.com/wday/cxs/acme/careers/jobs": WD_LIST,
+               "https://acme.wd5.myworkdayjobs.com/wday/cxs/acme/careers/job/Austin/Software": WD_DETAIL,
+               "https://beta.wd1.myworkdayjobs.com/wday/cxs/beta/careers/jobs": httpx.Response(429)})
+    report = run_search(load_settings(tmp_path), tracker, client=c, now=NOW)
+    assert report.slow_lane == {"checked": 1, "jobs": 1, "throttled": 1, "left for next run": 0}
+    from jobagent.summary import build_summary
+    text = build_summary(tracker, report, None, None, None)
+    assert "Workday slow lane (one site at a time): 1 sites checked, 1 new US tech jobs, 1 throttled" in text
