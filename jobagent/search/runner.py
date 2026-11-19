@@ -40,11 +40,31 @@ MAX_FAILURES = 3
 # How many sites of a throttling service are checked at the same time.
 # Workday: most companies share a few servers (wd1, wd3, wd5), which throttle cloud addresses hard.
 PER_SERVICE = {"workable": 2, "smartrecruiters": 4, "eightfold": 1, "amazon": 1, "workday": 4}
-TEMPORARY = ("network", "timeout", "slow down", "server error")
+TEMPORARY = ("network", "timeout", "slow down", "server error", "left for the next run")
+# The board-polling step stops starting new sites after this long; the rest go first next time (the oldest
+# checked are always polled first), so every site is still covered over a few days.
+SEARCH_BUDGET_MINUTES = 45
+# After this many "slow down" answers in a row from one server, its remaining sites wait for the next run.
+# (Workday serves most companies from a few shared servers, wd1/wd3/wd5…, which throttle cloud addresses hard.)
+THROTTLE_STRIKES = 5
+
+
+class Deferred(Exception):
+    """A site not checked in this run (time budget used up, or its server is throttling); it goes first next time."""
+
+
+def server_of(board: dict) -> str:
+    """The server a site lives on, for throttling: a Workday shard like wd5.myworkdayjobs.com, else the service."""
+    if board["ats_type"] == "workday":
+        host = board["token"].split("|")[0]
+        return host.split(".", 1)[1] if "." in host else host
+    return board["ats_type"]
 
 
 def error_kind(e: Exception) -> str:
     """A short, plain label for why a site couldn't be checked."""
+    if isinstance(e, Deferred):
+        return "left for the next run"
     if isinstance(e, httpx.HTTPStatusError):
         code = e.response.status_code
         if code == 429:
@@ -127,7 +147,7 @@ def _add_boards(tracker: Tracker, report: SearchReport, boards: dict[tuple[str, 
 def run_search(
     settings: Settings, tracker: Tracker, *, client: httpx.Client | None = None,
     now: datetime | None = None, trace_limit: int = 150, extract=None,
-    workers: int = 12,
+    workers: int = 12, budget_minutes: float | None = SEARCH_BUDGET_MINUTES,
 ) -> SearchReport:
     now = now or datetime.now(timezone.utc)
     since = now - timedelta(days=settings.max_age_days)
@@ -211,10 +231,27 @@ def run_search(
         # Services that throttle: at most this many of their sites are checked at once.
         gates = {ats: threading.Semaphore(n) for ats, n in PER_SERVICE.items()}
 
+        # A time budget for the whole polling step, and a circuit breaker per server.
+        deadline = time.monotonic() + budget_minutes * 60 if budget_minutes else None
+        strikes: dict[str, int] = {}
+        strikes_lock = threading.Lock()
+
+        def strike(server: str, throttled: bool) -> None:
+            with strikes_lock:
+                strikes[server] = strikes.get(server, 0) + 1 if throttled else 0
+
         def poll(b: dict):
             key = (b["ats_type"], b["token"])
+            server = server_of(b)
+            if deadline and time.monotonic() > deadline:
+                return b, None, Deferred("search time budget used up")
+            with strikes_lock:
+                if strikes.get(server, 0) >= THROTTLE_STRIKES:
+                    return b, None, Deferred(f"{server} keeps asking to slow down")
             gate = gates.get(b["ats_type"])
-            for attempt in range(3):
+            # Workday retries each request itself; retrying the whole site on top made one slow site take minutes.
+            tries = 1 if b["ats_type"] == "workday" else 3
+            for attempt in range(tries):
                 try:
                     jobs = finder.boards.get(key)  # already fetched earlier in this run
                     if jobs is None:
@@ -223,9 +260,12 @@ def run_search(
                                 jobs = FETCHERS[b["ats_type"]](client, b["token"], since=since, skip=skip)
                         else:
                             jobs = FETCHERS[b["ats_type"]](client, b["token"], since=since, skip=skip)
+                    strike(server, throttled=False)
                     return b, jobs, None
                 except httpx.HTTPStatusError as e:
-                    if e.response.status_code != 429 or attempt == 2:
+                    if e.response.status_code == 429 and attempt == tries - 1:
+                        strike(server, throttled=True)
+                    if e.response.status_code != 429 or attempt == tries - 1:
                         return b, None, e
                     # "Slow down": wait as long as the service asks (or a few seconds), then try again.
                     time.sleep(min(float(e.response.headers.get("retry-after") or 5 * (attempt + 1)), 30))
@@ -244,7 +284,8 @@ def run_search(
                 if err:
                     kind = error_kind(err)
                     report.hiccups[kind] = report.hiccups.get(kind, 0) + 1
-                    log.warning("%s/%s: %s", b["ats_type"], b["token"], err)
+                    if not isinstance(err, Deferred):  # deferred sites are counted, not logged one by one
+                        log.warning("%s/%s: %s", b["ats_type"], b["token"], err)
                     if kind not in TEMPORARY:  # network blips and "slow down" don't count against the site
                         b["failures"] += 1
                     continue

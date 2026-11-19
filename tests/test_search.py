@@ -343,3 +343,40 @@ def test_workday_detail_that_stays_throttled_is_a_slow_down_not_bad_data(monkeyp
     with pytest.raises(httpx.HTTPStatusError) as e:
         ats.fetch_workday(c, "acme.wd5.myworkdayjobs.com|acme|careers", since=NOW - timedelta(days=7))
     assert error_kind(e.value) == "slow down"  # doesn't count against the site
+
+
+def test_a_throttling_workday_server_is_left_for_the_next_run(tmp_path, monkeypatch):
+    """After a few "slow down"s in a row from one Workday server, its other sites wait for tomorrow (no failure
+    counted), while other servers carry on."""
+    from jobagent.search import ats, runner
+
+    monkeypatch.setattr(ats.time, "sleep", lambda s: None)
+    tracker = Tracker(tmp_path / "t.xlsx", tmp_path / "jobs")
+    for i in range(12):
+        tracker.add_board("workday", f"co{i}.wd5.myworkdayjobs.com|co{i}|careers")
+    tracker.add_board("workday", "ok.wd1.myworkdayjobs.com|ok|careers")
+    calls = []
+
+    def handler(request):
+        calls.append(str(request.url))
+        if ".wd5." in str(request.url):
+            return httpx.Response(429, text="Too Many Requests")
+        if ".wd1." in str(request.url):
+            return httpx.Response(200, json={"total": 0, "jobPostings": []})
+        return httpx.Response(404)  # the job lists and other sources aren't part of this test
+
+    c = httpx.Client(transport=httpx.MockTransport(handler))
+    report = run_search(load_settings(tmp_path), tracker, client=c, now=NOW, workers=1)
+    assert report.hiccups.get("left for the next run", 0) >= 12 - runner.THROTTLE_STRIKES  # the breaker tripped
+    assert sum(".wd5." in u for u in calls) <= runner.THROTTLE_STRIKES * ats.WORKDAY_TRIES  # stopped asking
+    assert all(b["failures"] == 0 for b in tracker.boards.values())  # never counted against a site
+    assert tracker.boards[("workday", "ok.wd1.myworkdayjobs.com|ok|careers")].get("last_polled")
+
+
+def test_search_stops_starting_sites_when_its_time_budget_is_used(tmp_path):
+    tracker = Tracker(tmp_path / "t.xlsx", tmp_path / "jobs")
+    tracker.add_board("workday", "acme.wd5.myworkdayjobs.com|acme|careers")
+    c = _mock({})
+    report = run_search(load_settings(tmp_path), tracker, client=c, now=NOW, budget_minutes=-1)  # already over
+    assert report.hiccups == {"left for the next run": 1} and report.boards_polled == 0
+    assert tracker.boards[("workday", "acme.wd5.myworkdayjobs.com|acme|careers")]["failures"] == 0
