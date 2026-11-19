@@ -137,7 +137,7 @@ def fetch_ashby(
 
 WORKDAY_JOBS = "https://{host}/wday/cxs/{tenant}/{site}/jobs"
 WORKDAY_PAGES = 10  # at most 200 newest postings per site per day
-WORKDAY_TRIES = 4  # Workday answers "429 slow down" readily, especially to cloud (data-center) addresses
+WORKDAY_TRIES = 2  # one polite retry per request; a server that keeps saying "slow down" is left for the next run
 
 
 def _workday(client: httpx.Client, method: str, url: str, **kw) -> httpx.Response:
