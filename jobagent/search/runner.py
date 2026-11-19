@@ -39,7 +39,9 @@ MAX_FAILURES = 3
 
 # How many sites of a throttling service are checked at the same time.
 # Workday: most companies share a few servers (wd1, wd3, wd5), which throttle cloud addresses hard.
-PER_SERVICE = {"workable": 2, "smartrecruiters": 4, "eightfold": 1, "amazon": 1, "workday": 4}
+PER_SERVICE = {"workable": 2, "smartrecruiters": 4, "eightfold": 1, "amazon": 1}
+# Services checked one site at a time in their own lane, beside everything else (paced in ats.py).
+SLOW_LANE = ("workday",)
 TEMPORARY = ("network", "timeout", "slow down", "server error", "left for the next run")
 # The board-polling step stops starting new sites after this long; the rest go first next time (the oldest
 # checked are always polled first), so every site is still covered over a few days.
@@ -95,6 +97,8 @@ class SearchReport:
     stale: int = 0
     added: int = 0
     hiccups: dict[str, int] = field(default_factory=dict)  # sites that couldn't be checked, by reason
+    # The Workday slow lane, for the summary: sites checked, new jobs, sites throttled, sites left for next run.
+    slow_lane: dict[str, int] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
 
 
@@ -274,8 +278,23 @@ def run_search(
             return b, None, RuntimeError("retries exhausted")
 
         polled: set[tuple[str, str]] = set()
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            for b, jobs, err in pool.map(poll, tracker.active_boards(MAX_FAILURES)):
+        boards = tracker.active_boards(MAX_FAILURES)  # least recently checked first
+        slow = [b for b in boards if b["ats_type"] in SLOW_LANE]
+        fast = [b for b in boards if b["ats_type"] not in SLOW_LANE]
+        lane = {"checked": 0, "jobs": 0, "throttled": 0, "left for next run": 0} if slow else {}
+        with ThreadPoolExecutor(max_workers=workers) as pool, ThreadPoolExecutor(max_workers=1) as slow_pool:
+            # The slow lane walks its sites one at a time, alongside the other services.
+            slow_results = slow_pool.submit(lambda: [poll(b) for b in slow])
+            results = list(pool.map(poll, fast)) + slow_results.result()
+            for b, jobs, err in results:
+                if b["ats_type"] in SLOW_LANE:
+                    if err is None:
+                        lane["checked"] += 1
+                        lane["jobs"] += len(jobs)
+                    elif isinstance(err, Deferred):
+                        lane["left for next run"] += 1
+                    elif error_kind(err) == "slow down":
+                        lane["throttled"] += 1
                 if isinstance(err, BoardNotFound):
                     b["failures"] = MAX_FAILURES
                     report.boards_gone += 1
@@ -296,6 +315,7 @@ def run_search(
                 found.extend(jobs)
                 polled.add((b["ats_type"], b["token"]))
                 report.boards_polled += 1
+        report.slow_lane = lane
         found.extend(j for j in listings if detect_board(j["apply_url"]) not in polled)
     finally:
         if own_client:
