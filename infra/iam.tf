@@ -102,3 +102,38 @@ resource "aws_iam_role_policy" "scheduler" {
     ]
   })
 }
+
+# ---- Your Mac: a key that can only reach ApplyPilot's bucket and secrets ---------------------------------------
+# Used by `apply`, `cloud-push/pull` and `cloud-secrets` (AWS_PROFILE=applypilot in .env), so they never need
+# `aws login`. The user was created by hand in CloudShell on 25 Nov 2026; the import blocks adopt it here.
+# Its access key is deliberately NOT managed by Terraform (the secret would be stored in the state file):
+# create or rotate it with `aws iam create-access-key --user-name applypilot-mac`.
+resource "aws_iam_user" "mac" {
+  name = "${local.name}-mac"
+}
+
+import {
+  to = aws_iam_user.mac
+  id = "applypilot-mac"
+}
+
+resource "aws_iam_user_policy" "mac" {
+  name = "applypilot-only"
+  user = aws_iam_user.mac.name
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      { Effect = "Allow", Action = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+      Resource = "${aws_s3_bucket.state.arn}/*" },
+      { Effect = "Allow", Action = "s3:ListBucket", Resource = aws_s3_bucket.state.arn },
+      { Effect = "Allow", Action = ["ssm:PutParameter", "ssm:GetParameter"], Resource = "${local.ssm_path}/*" },
+      { Effect = "Allow", Action = ["kms:Encrypt", "kms:Decrypt"], Resource = "*",
+      Condition = { StringEquals = { "kms:ViaService" = "ssm.${var.region}.amazonaws.com" } } },
+    ]
+  })
+}
+
+import {
+  to = aws_iam_user_policy.mac
+  id = "applypilot-mac:applypilot-only"
+}
