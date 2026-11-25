@@ -232,23 +232,63 @@ def test_eval_driven_rules(tmp_path):
     assert r.dropped == {"3 experience": 1}  # "Mid-Level" in the title is a free check
 
 
-def test_analyst_roles_are_skipped(tmp_path):
-    # By title for free, and by the work itself when the title doesn't say "analyst".
-    t = _tracker(tmp_path, [{"title": "Regulatory Policy Analyst", "desc": "x"},
-                            {"title": "CRM Analyst", "desc": "x"},
-                            {"title": "Insights Associate", "desc": "analysis"},
+def test_only_technical_analysts_count_and_they_rank_low(tmp_path):
+    """Non-technical analysts are dropped; technical ones pass but rank below building roles (your 25 Nov rule)."""
+    t = _tracker(tmp_path, [{"title": "Business Operations Analyst", "desc": "biz"},
+                            {"title": "Data Analyst I", "desc": "data"},
                             {"title": "Software Engineer", "desc": "swe"}])
-    answers = {"analysis": A(role_family="data_analyst"), "swe": A()}
-    read = []
+    answers = {"biz": A(role_family="business_analyst"), "data": A(role_family="data_analyst"), "swe": A()}
+    r = run_funnel(t, lambda j, d: answers[d.split()[0]], top_n=5, max_age_days=7, fresh_hours=24, now=NOW, workers=1)
+    assert [j["title"] for j in r.shortlisted] == ["Software Engineer", "Data Analyst I"]   # analyst ranked lower
+    assert r.shortlisted[0]["score"] - r.shortlisted[1]["score"] == 10                      # the analyst penalty
+    assert r.dropped == {"2 tech": 1}                                                       # business analyst dropped
 
-    def assess(j, d):
-        read.append(j["title"])
-        return answers[d.split()[0]]
 
-    r = run_funnel(t, assess, top_n=5, max_age_days=7, fresh_hours=24, now=NOW, workers=1)
+def test_at_most_two_analysts_per_list(tmp_path):
+    t = _tracker(tmp_path, [{"title": f"Data Analyst {i}", "desc": "data"} for i in range(4)])
+    r = run_funnel(t, lambda j, d: A(role_family="data_analyst"), top_n=5, max_age_days=7, fresh_hours=24, now=NOW,
+                   workers=1)
+    assert len(r.shortlisted) == 2
+
+
+def test_salesforce_roles_only_at_entry_level(tmp_path):
+    t = _tracker(tmp_path, [{"title": "Salesforce Administrator", "desc": "entry"},
+                            {"title": "Salesforce Admin II", "desc": "mid"},
+                            {"title": "Salesforce Developer", "desc": "twoyears"}])
+    answers = {"entry": A(role_family="salesforce"), "mid": A(role_family="salesforce", expected_level="mid"),
+               "twoyears": A(role_family="salesforce", required_years=2)}
+    r = run_funnel(t, lambda j, d: answers[d.split()[0]], top_n=5, max_age_days=7, fresh_hours=24, now=NOW, workers=1)
+    assert [j["title"] for j in r.shortlisted] == ["Salesforce Administrator"]
+    assert r.dropped == {"3 experience": 2}
+
+
+def test_weak_matches_pass_but_are_not_shortlisted(tmp_path):
+    t = _tracker(tmp_path, [{"title": "Network Engineer", "desc": "weak"}, {"title": "Software Engineer", "desc": "ok"}])
+    answers = {"weak": A(skills_match=40), "ok": A(skills_match=70)}
+    r = run_funnel(t, lambda j, d: answers[d.split()[0]], top_n=5, max_age_days=7, fresh_hours=24, now=NOW, workers=1)
+    assert r.passed == 2                                       # 40 still passes the funnel (≥ 35)...
+    assert [j["title"] for j in r.shortlisted] == ["Software Engineer"]   # ...but needs 50 to be shortlisted
+
+
+def test_waiting_jobs_are_rejudged_with_todays_rules(tmp_path, monkeypatch):
+    """A job scored on an earlier day is re-checked every run: new rules apply at once, recency fades."""
+    from jobagent.score import funnel
+
+    t = _tracker(tmp_path, [{"title": "Data Analyst", "desc": "data"}, {"title": "Software Engineer", "desc": "swe"}])
+    answers = {"data": A(role_family="business_analyst"), "swe": A()}
+    run_funnel(t, lambda j, d: answers[d.split()[0]], top_n=0, top_n_intern=0, max_age_days=7, fresh_hours=24,
+               now=NOW, workers=1)   # day 1: scored, nothing shortlisted (0 slots)
+    swe = next(j for j in t.jobs.values() if j["title"] == "Software Engineer")
+    day1 = swe["score"]
+    # A job that passed on day 1 under older rules: pretend the data analyst was saved as passing.
+    da = next(j for j in t.jobs.values() if j["title"] == "Data Analyst")
+    t.update(da["id"], status="found", score=70.0)
+    later = NOW + timedelta(days=2)
+    r = run_funnel(t, lambda j, d: (_ for _ in ()).throw(AssertionError("no new Claude reads")), top_n=5,
+                   max_age_days=7, fresh_hours=24, now=later, workers=1)
+    assert t.jobs[da["id"]]["status"] == "skipped" and r.rechecked_out == 1   # today's rule drops it
+    assert t.jobs[swe["id"]]["score"] == day1 - 20                            # recency points faded
     assert [j["title"] for j in r.shortlisted] == ["Software Engineer"]
-    assert sorted(read) == ["Insights Associate", "Software Engineer"]  # analyst titles never cost a Claude read
-    assert r.dropped == {"2 tech": 3}
 
 
 def test_mid_level_duties_rank_below_entry_level(tmp_path):
@@ -283,3 +323,12 @@ def test_careful_read_takes_the_best_screen_survivors(tmp_path):
     assert any("wait for tomorrow's careful read" in e for e in r.errors)
     waiting = [j for j in t.jobs.values() if j["status"] == "found" and j.get("score") is None]
     assert len(waiting) == 3
+
+
+def test_a_weak_job_already_on_the_shortlist_goes_back_to_the_pool(tmp_path):
+    t = _tracker(tmp_path, [{"title": "Perception Engineer", "desc": "weak"}])
+    run_funnel(t, lambda j, d: A(skills_match=40), top_n=5, max_age_days=7, fresh_hours=24, now=NOW, workers=1)
+    job = next(iter(t.jobs.values()))
+    t.update(job["id"], status="shortlisted")      # shortlisted on an earlier day, before the minimum existed
+    r = run_funnel(t, lambda j, d: A(), top_n=5, max_age_days=7, fresh_hours=24, now=NOW, workers=1)
+    assert t.jobs[job["id"]]["status"] == "found" and r.rechecked_out == 1 and not r.shortlisted
