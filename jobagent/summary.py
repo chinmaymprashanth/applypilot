@@ -69,7 +69,11 @@ def build_summary(tracker: Tracker, search=None, funnel=None, tailored=None, inb
                 f"dropped {funnel.screened_out} that clearly failed a check; Claude Sonnet then read "
                 f"**{funnel.second_read}** carefully:", ""]
         out += [f"- dropped {n}: {STAGES.get(stage, stage)}" for stage, n in sorted(funnel.dropped.items())]
-        out += [f"- **passed every check: {funnel.passed}**", "",
+        out += [f"- **passed every check: {funnel.passed}**"]
+        if getattr(funnel, "rechecked_out", 0):
+            out.append(f"- re-checked with today's rules and removed from the waiting pool or your shortlist: "
+                       f"{funnel.rechecked_out}")
+        out += ["",
                 f"Promising jobs with only a job-board link or a short description were traced to the employer's "
                 f"own site and read in full before competing: **{funnel.enriched} confirmed**, "
                 f"{funnel.not_found} not found (dropped).", "",

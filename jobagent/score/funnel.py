@@ -40,9 +40,15 @@ SENIOR = re.compile(r"\b(senior|sr\.?|staff|principal|lead|manager|director|arch
 OTHER_FIELD = re.compile(r"\b(mechanical|electrical|civil|chemical|structural|manufacturing|hardware|firmware|"
                          r"embedded|analog|asic|fpga|rf|mechatronics|hvac|nurse|nursing|physician|pharmac\w*|"
                          r"clinical|therapist|technician)\b", re.I)
-# Analyst roles of any kind (data, business, policy...): the candidate has chosen not to apply to them.
+# Analyst roles: only technical ones (SQL, Python, data pipelines, systems analysis, with growth) are kept, and they
+# rank low and are few: the candidate prefers building roles. Non-technical analysts (business, operations, finance,
+# marketing, HR, policy) are dropped. Decided from the duties (role_family), not the title.
 ANALYST = re.compile(r"\banalysts?\b", re.I)
-ANALYST_FAMILIES = {"data_analyst", "business_analyst"}
+ANALYST_PENALTY = 10  # points off a technical analyst role's score
+MAX_ANALYSTS = 2      # at most this many analyst roles per shortlist (full-time, and intern/part-time)
+# Shortlisting needs at least this skills match. Weaker jobs can still pass (MIN_SKILLS_MATCH) and wait in the
+# pool, but entry-level and recency points alone must not put a weak match on your list.
+SHORTLIST_MIN_MATCH = 50
 # At most this many jobs per company are read each day; the rest wait for the next run.
 PER_COMPANY = 3
 # The lenient first screen lets through anything at or above this fit; the careful read uses MIN_SKILLS_MATCH.
@@ -103,10 +109,12 @@ Rules:
   can be software roles; "Analyst" can be data analysis or clerical work. Decide from the duties.
 - required_years: only experience the posting requires ("must have", "minimum", "X+ years required").
   Put "preferred"/"nice to have" years in preferred_years instead. Ranges like "2-4 years" count as 2.
-- Salesforce administrator, developer or consultant roles are tech roles: role_family "salesforce".
-- Roles whose main work is analysis rather than building software or AI (data analyst, business analyst,
-  policy, operations or strategy analyst): role_family "data_analyst" or "business_analyst", whatever the
-  title says. The candidate isn't applying to analyst roles.
+- Salesforce administrator, developer or consultant roles are tech roles: role_family "salesforce". Judge
+  expected_level and required_years for them as carefully as for any role.
+- Analyst roles, decided from the duties whatever the title says: technical analysis with a growth path (writing
+  SQL or Python, building data pipelines, dashboards, models or tools, systems or technical analysis):
+  role_family "data_analyst", is_tech_role true. Mainly non-technical analysis (business, operations, finance,
+  marketing, sales, HR, policy or strategy; spreadsheet reporting): role_family "business_analyst".
 - Internships and co-ops are fine for this candidate; list "unpaid" in red_flags if the posting says so.
   The candidate is a Salesforce Certified Administrator; Apex/LWC development is training only.
 - low_skill: true for work with no engineering or analysis and no growth path: data entry, manual QA
@@ -152,6 +160,16 @@ class Verdict:
     parts: dict[str, float] = field(default_factory=dict)  # points per WEIGHTS key
 
 
+def stored_assessment(tracker: Tracker, jid: str) -> "Assessment | None":
+    """Claude's saved reading of a job (from an earlier day), or None if missing or in an older format."""
+    path = tracker.jobs_dir / f"{jid}.json"
+    try:
+        saved = json.loads(path.read_text()).get("assessment")
+        return Assessment.model_validate(saved) if saved else None
+    except Exception:  # noqa: BLE001 - an unreadable or outdated reading just means "can't re-judge"
+        return None
+
+
 def precheck(job: dict, tracker: Tracker, max_age_days: int, now: datetime) -> Verdict | None:
     """Free checks before paying Claude to read anything. Returns a Verdict only when dropping."""
     hours = age_hours(job.get("posted_at"), now)
@@ -165,8 +183,6 @@ def precheck(job: dict, tracker: Tracker, max_age_days: int, now: datetime) -> V
         return Verdict("3 experience", "mid-level title")
     if OTHER_FIELD.search(job["title"]):
         return Verdict("2 tech", "a field outside your background (by title)")
-    if ANALYST.search(job["title"]):
-        return Verdict("2 tech", "analyst role (you've chosen to skip these, by title)")
     if tracker.already_applied(job["company"], job["title"]):
         return Verdict("applied", "already applied to this company and role")
     return None
@@ -178,8 +194,8 @@ def judge(a: Assessment, job: dict, fresh_hours: int, now: datetime, min_match: 
     pass, which leaves the finer calls (mid-level duties) to the careful read."""
     if a.us_eligible == "no":
         return Verdict("1 us", "description says not open to US-based candidates")
-    if a.role_family in ANALYST_FAMILIES:
-        return Verdict("2 tech", f"analyst work, which you've chosen to skip ({a.summary})")
+    if a.role_family == "business_analyst":
+        return Verdict("2 tech", f"non-technical analyst role ({a.summary})")
     if a.role_family == "non_tech" or not a.is_tech_role:
         return Verdict("2 tech", f"not a tech role ({a.summary})")
     if a.required_years is not None and a.required_years >= 3:
@@ -188,6 +204,8 @@ def judge(a: Assessment, job: dict, fresh_hours: int, now: datetime, min_match: 
         return Verdict("3 experience", f"duties expect senior-level experience ({a.summary})")
     if a.requires_clearance:
         return Verdict("3 experience", "requires security clearance")
+    if not screen and a.role_family == "salesforce" and (a.expected_level != "entry" or (a.required_years or 0) > 1):
+        return Verdict("3 experience", f"Salesforce role above entry level ({a.summary})")
     if a.low_skill:
         return Verdict("4 career", f"low-skill role ({a.summary})")
     if any("unpaid" in f.lower() for f in a.red_flags):
@@ -208,6 +226,8 @@ def judge(a: Assessment, job: dict, fresh_hours: int, now: datetime, min_match: 
         "company": WEIGHTS["company"] * pct(a.company_outlook),
         "odds": WEIGHTS["odds"] * pct(a.interview_odds),
     }
+    if a.role_family == "data_analyst":
+        parts["analyst"] = -ANALYST_PENALTY  # allowed, but ranked below building roles
     parts = {k: round(v, 1) for k, v in parts.items()}
     stretch = a.degree_required in ("master", "phd") or (a.preferred_years or 0) >= 3
     return Verdict(None, a.summary, round(sum(parts.values()), 1), tier, stretch, parts)
@@ -223,6 +243,7 @@ class FunnelReport:
     second_read: int = 0   # read carefully after passing the first screen
     enriched: int = 0   # jobs given the employer's own link and full description, then re-read
     not_found: int = 0  # jobs whose employer posting couldn't be found or read (dropped)
+    rechecked_out: int = 0  # waiting or shortlisted jobs dropped when re-judged with today's rules
     errors: list[str] = field(default_factory=list)
 
 
@@ -252,6 +273,27 @@ def run_funnel(
         hours = age_hours(job.get("posted_at"), now)
         if hours is not None and hours > max_age_days * 24:
             tracker.update(job["id"], status="skipped", filtered_reason="expired on your shortlist")
+
+    # Jobs scored on earlier days (waiting in the pool, or already on your shortlist) are re-judged every run with
+    # today's rules and today's date, from Claude's saved reading (no new cost). Rule changes take effect at once,
+    # and recency points fade as a job gets older.
+    earlier = [*tracker.with_status("shortlisted"),
+               *(j for j in tracker.with_status("found") if j.get("score") is not None)]
+    for job in earlier:
+        v = precheck(job, tracker, max_age_days, now)
+        a = None if v else stored_assessment(tracker, job["id"])
+        if a is not None:
+            v = judge(a, job, fresh_hours, now)
+            if not v.stage:
+                tracker.update(job["id"], score=v.score, fit=v.reason)
+                tracker.save_detail(job["id"], score_parts=v.parts)
+                if job["status"] == "shortlisted" and a.skills_match < SHORTLIST_MIN_MATCH:
+                    tracker.update(job["id"], status="found")  # too weak for your list; back to the waiting pool
+                    report.rechecked_out += 1
+                continue
+        if v and v.stage:
+            report.rechecked_out += 1
+            tracker.update(job["id"], status="skipped", filtered_reason=f"re-checked: {v.stage}: {v.reason}")
 
     to_read = []
     for job in jobs:
@@ -353,11 +395,18 @@ def run_funnel(
     # Two lists, filled separately: full-time, and internships & part-time.
     limits = {"full_time": top_n, "intern_pt": top_n_intern}
     picked = {kind: 0 for kind in limits}
+    analysts = {kind: 0 for kind in limits}
     while heap and any(picked[k] < limits[k] for k in limits):
         _, i, r = heapq.heappop(heap)
         kind = r.get("kind") or "full_time"
         if picked.get(kind, 0) >= limits.get(kind, 0):
             continue
+        a = stored_assessment(tracker, r["id"])
+        if a is not None and a.skills_match < SHORTLIST_MIN_MATCH:
+            continue  # passed, but too weak a match for your list; it waits in the pool
+        is_analyst = (a is not None and a.role_family == "data_analyst") or bool(ANALYST.search(r["title"]))
+        if is_analyst and analysts.get(kind, 0) >= MAX_ANALYSTS:
+            continue  # analyst roles are allowed, but only a few
         description = tracker.description(r["id"])
         if r["id"] not in done and needs_enrichment(r, description):
             done.add(r["id"])
@@ -389,6 +438,7 @@ def run_funnel(
             continue
         tracker.update(r["id"], status="shortlisted")
         picked[kind] += 1
+        analysts[kind] = analysts.get(kind, 0) + is_analyst
         report.shortlisted.append(tracker.jobs[r["id"]])
     return report
 
