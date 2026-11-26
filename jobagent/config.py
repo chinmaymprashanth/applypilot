@@ -46,6 +46,8 @@ class Settings:
     anthropic_api_key: str | None = None
     adzuna_app_id: str | None = None
     adzuna_app_key: str | None = None
+    # Optional: Hunter.io email checks for outreach (free plan: 50 credits a month, half a credit per check).
+    hunter_api_key: str | None = None
 
     @property
     def tracker_path(self) -> Path:
@@ -88,4 +90,5 @@ def load_settings(root: Path | None = None) -> Settings:
         anthropic_api_key=os.getenv("ANTHROPIC_API_KEY") or None,
         adzuna_app_id=os.getenv("ADZUNA_APP_ID") or None,
         adzuna_app_key=os.getenv("ADZUNA_APP_KEY") or None,
+        hunter_api_key=os.getenv("HUNTER_API_KEY") or None,
     )

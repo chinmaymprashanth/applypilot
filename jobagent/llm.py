@@ -170,6 +170,7 @@ def parse_with_search(
     max_tokens: int = 16000,
     effort: str = "medium",
     step: str = "other",
+    blocked_domains: list[str] | None = None,
 ) -> tuple[T, list[dict]]:
     """Like parse(), but Claude may search the web first (Anthropic's server-side web search tool).
 
@@ -177,14 +178,16 @@ def parse_with_search(
     ({"url", "title"}). Callers check that any link in the answer came from these results."""
     messages: list[dict] = [{"role": "user", "content": content}]
     results: list[dict] = []
+    tool = {"type": WEB_SEARCH_BASIC if "haiku" in model else WEB_SEARCH, "name": "web_search", "max_uses": max_searches}
+    if blocked_domains:
+        tool["blocked_domains"] = blocked_domains  # the search never returns pages from these sites
     for _ in range(5):  # the server pauses long search loops; resend to let it continue
         response = guard_credits(lambda: client.beta.messages.parse(
             model=model,
             max_tokens=max_tokens,
             system=system,
             messages=messages,
-            tools=[{"type": WEB_SEARCH_BASIC if "haiku" in model else WEB_SEARCH, "name": "web_search",
-                    "max_uses": max_searches}],
+            tools=[tool],
             output_format=schema,
             output_config={"effort": effort},
             **_model_kwargs(model),

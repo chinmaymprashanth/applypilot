@@ -165,6 +165,8 @@ def apply_emails(tracker: Tracker, emails: list[Email], classify: Classify) -> I
         status = NEW_STATUS.get(u.kind)
         if status and job.get("status") != "offer":  # an offer is never overwritten
             fields["status"] = status
+        if status == "interview" and not job.get("interview_date"):
+            fields["interview_date"] = email.received  # for the weekly outreach funnel
         tracker.update(job["id"], **fields)
         report.updates.append(f"{job['company']} - {job['title']}: {u.kind}"
                               + (f" -> {fields['status']}" if "status" in fields else "") + f" ({u.summary})")

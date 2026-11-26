@@ -290,3 +290,36 @@ def test_saves_mark_unsynced_changes_only_on_a_synced_machine(tmp_path, monkeypa
     monkeypatch.delenv("ECS_CONTAINER_METADATA_URI_V4")
     _tracker(mac).save()
     assert cloud.read_sync(mac)["dirty"]                  # on the Mac: yes
+
+
+def test_download_keeps_outreach_contacts_from_both_sides(tmp_path, monkeypatch):
+    """Contacts added on the Mac and replies noticed by the AWS run both survive a download."""
+    from jobagent import cli
+    from jobagent.outreach.contacts import new_contact, record_sent
+
+    monkeypatch.setenv(cloud.BUCKET_ENV, "b")
+    monkeypatch.setattr(cli.typer, "echo", lambda *a, **k: None)
+    monkeypatch.setattr(cli.typer, "secho", lambda *a, **k: None)
+    s3 = VersionedS3()
+    store = cloud.Store("b", s3)
+    mac = tmp_path / "mac" / "data"
+    t = _tracker(mac)
+    a = _add(t, "Acme", "Engineer")
+    old = t.add_contact(new_contact(t.jobs[a], "Pat Lee", "engineer", "email"))
+    record_sent(old, "2026-11-20")
+    t.save()
+    store.push(mac)
+
+    box = tmp_path / "cloud" / "data"                 # the AWS run notices Pat replied
+    store.pull(box)
+    tc = _tracker(box)
+    tc.contacts[old["id"]].update(status="replied", replied_date="2026-11-24")
+    tc.save()
+    store.push(box)
+
+    t = _tracker(mac)                                 # meanwhile the Mac adds a hiring manager
+    new = t.add_contact(new_contact(t.jobs[a], "Sam Diaz", "hiring_manager", "email"))
+    t.save()
+    cli._sync_down(store, mac)
+    merged = _tracker(mac).contacts
+    assert merged[old["id"]]["status"] == "replied" and new["id"] in merged

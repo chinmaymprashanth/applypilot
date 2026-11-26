@@ -87,6 +87,26 @@ BOARD_COLUMNS: list[tuple[str, str, int]] = [
 ]
 BOARD_KEYS = [k for k, _, _ in BOARD_COLUMNS]
 
+# People you reach out to about a job (see jobagent/outreach). Status and notes edited in the sheet are kept.
+CONTACTS_SHEET = "Contacts"
+CONTACT_COLUMNS: list[tuple[str, str, int]] = [
+    ("company", "Company", 22),
+    ("name", "Person", 22),
+    ("title", "Their role", 26),
+    ("role", "Why them", 14),
+    ("channel", "Channel", 9),
+    ("email", "Email", 28),
+    ("email_status", "Email check", 14),
+    ("status", "Status", 10),
+    ("first_sent", "First sent", 11),
+    ("follow_up_due", "Follow up on", 12),
+    ("notes", "Notes", 40),
+    ("source_url", "Found at", 30),
+    ("id", "ID", 14),
+]
+CONTACT_KEYS = [k for k, _, _ in CONTACT_COLUMNS]
+CONTACT_EDITABLE = ("status", "notes")
+
 CLOSED_STATUSES = {"applied", "interview", "rejected", "offer"}
 
 
@@ -142,6 +162,7 @@ class Tracker:
         self.db_path = db_path or jobs_dir.parent / "jobagent.db"
         self.jobs: dict[str, dict[str, Any]] = {}
         self.boards: dict[tuple[str, str], dict[str, Any]] = {}
+        self.contacts: dict[str, dict[str, Any]] = {}
         self.excel_stale = False  # True when the last save couldn't update tracker.xlsx (open in Excel)
         if self.db_path.exists():
             self._load_db()
@@ -176,6 +197,18 @@ class Tracker:
 
     def _apply_sheet_edits(self, wb) -> None:
         """Edits made in "My Applications" (status, follow-up date, latest update) win."""
+        if CONTACTS_SHEET in wb.sheetnames:
+            from .outreach.contacts import STATUSES as CONTACT_STATUSES, set_status
+
+            for row in wb[CONTACTS_SHEET].iter_rows(min_row=2, values_only=True):
+                rec = dict(zip(CONTACT_KEYS, row))
+                c = self.contacts.get(rec.get("id"))
+                if c is None:
+                    continue
+                if rec.get("notes") != c.get("notes"):
+                    c["notes"] = rec.get("notes")
+                if rec.get("status") != c.get("status") and rec.get("status") in CONTACT_STATUSES:
+                    set_status(c, rec["status"])
         if APPLIED_SHEET not in wb.sheetnames:
             return
         for row in wb[APPLIED_SHEET].iter_rows(min_row=2, values_only=True):
@@ -193,6 +226,7 @@ class Tracker:
         con.execute("CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, data TEXT NOT NULL)")
         con.execute("CREATE TABLE IF NOT EXISTS boards (ats TEXT, token TEXT, data TEXT NOT NULL, PRIMARY KEY (ats, token))")
         con.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+        con.execute("CREATE TABLE IF NOT EXISTS contacts (id TEXT PRIMARY KEY, data TEXT NOT NULL)")
         return con
 
     def _load_db(self) -> None:
@@ -201,6 +235,8 @@ class Tracker:
                 self.jobs[jid] = {k: None for k in JOB_KEYS} | json.loads(data)
             for ats, token, data in con.execute("SELECT ats, token, data FROM boards"):
                 self.boards[(ats, token)] = json.loads(data)
+            for cid, data in con.execute("SELECT id, data FROM contacts"):
+                self.contacts[cid] = json.loads(data)
             row = con.execute("SELECT value FROM meta WHERE key = 'excel_exported'").fetchone()
             self._exported_mtime = float(row[0]) if row else 0.0
 
@@ -221,6 +257,9 @@ class Tracker:
             con.execute("DELETE FROM boards")
             con.executemany("INSERT INTO boards VALUES (?, ?, ?)",
                             [(a, t, json.dumps(b, default=str)) for (a, t), b in self.boards.items()])
+            con.execute("DELETE FROM contacts")
+            con.executemany("INSERT INTO contacts VALUES (?, ?)",
+                            [(cid, json.dumps(c, default=str, ensure_ascii=False)) for cid, c in self.contacts.items()])
 
     def save(self) -> bool:
         """Save the records, then export tracker.xlsx. Returns False if Excel had the file open (the records are
@@ -253,6 +292,8 @@ class Tracker:
         ws.column_dimensions[dedupe_col].hidden = True
         self._write_sheet(wb.create_sheet("Boards"), BOARD_COLUMNS, list(self.boards.values()))
         self._write_applications(wb.create_sheet(APPLIED_SHEET, 0), dv_formula=dv.formula1)
+        if self.contacts:
+            self._write_contacts(wb.create_sheet(CONTACTS_SHEET, 1))
         wb.active = 0
 
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -277,6 +318,18 @@ class Tracker:
         status_col = ws.cell(row=1, column=APPLIED_KEYS.index("status") + 1).column_letter
         dv.add(f"{status_col}2:{status_col}2000")
         ws.column_dimensions[ws.cell(row=1, column=APPLIED_KEYS.index("id") + 1).column_letter].hidden = True
+
+    def _write_contacts(self, ws) -> None:
+        from .outreach.contacts import STATUSES as CONTACT_STATUSES
+
+        rows = sorted(self.contacts.values(), key=lambda c: (c.get("follow_up_due") or "9999", c.get("company") or ""))
+        rows = [{**c, "first_sent": (c.get("sent_dates") or [None])[0]} for c in rows]
+        self._write_sheet(ws, CONTACT_COLUMNS, rows)
+        dv = DataValidation(type="list", formula1='"' + ",".join(CONTACT_STATUSES) + '"', allow_blank=False)
+        ws.add_data_validation(dv)
+        col = ws.cell(row=1, column=CONTACT_KEYS.index("status") + 1).column_letter
+        dv.add(f"{col}2:{col}2000")
+        ws.column_dimensions[ws.cell(row=1, column=CONTACT_KEYS.index("id") + 1).column_letter].hidden = True
 
     @staticmethod
     def _write_sheet(ws, columns, rows) -> None:
@@ -371,6 +424,15 @@ class Tracker:
             r.get("status") in CLOSED_STATUSES and company_key(r.get("company")) == c and _norm(r.get("title")) == t
             for r in self.jobs.values()
         )
+
+    # ---- contacts ------------------------------------------------------
+
+    def add_contact(self, contact: dict[str, Any]) -> dict[str, Any]:
+        """Add (or return the existing) contact; one record per person per job."""
+        return self.contacts.setdefault(contact["id"], contact)
+
+    def contacts_for(self, jid: str) -> list[dict[str, Any]]:
+        return [c for c in self.contacts.values() if c.get("job_id") == jid]
 
     # ---- boards --------------------------------------------------------
 

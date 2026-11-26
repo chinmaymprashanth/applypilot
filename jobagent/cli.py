@@ -165,7 +165,7 @@ def search() -> None:
 
 @app.command("gmail-login")
 def gmail_login() -> None:
-    """Sign in to Gmail (read-only) so search can read your LinkedIn and Indeed alerts."""
+    """Sign in to Gmail: read job alerts and replies, and save outreach drafts (jobagent never sends)."""
     from .search import gmail
 
     s = load_settings()
@@ -183,6 +183,13 @@ def gmail_login() -> None:
         typer.secho(f"Signed in, but Gmail refused: {gmail.explain_http_error(e)}", fg="red")
         raise typer.Exit(1)
     typer.echo(f"Signed in. {len(found.get('messages', []))} job alert emails in the last 30 days.")
+    if gmail.can_draft(s.data_dir / "gmail_token.json"):
+        typer.echo("Outreach drafts are allowed: they go to Gmail Drafts and you click Send.")
+    else:
+        typer.secho("Drafts weren't allowed, so outreach messages will go to your clipboard instead. "
+                    "Run gmail-login again and tick both boxes to save them as Gmail drafts.", fg="yellow")
+    if os.getenv("APPLYPILOT_BUCKET"):
+        typer.echo("Run `python -m jobagent cloud-secrets` so the AWS run uses this sign-in too.")
 
 
 @app.command("add-board")
@@ -432,13 +439,104 @@ def _apply_local(limit: int | None) -> None:
 
     preparer = Preparer(t, master, profile, claude_generator(client, s.model, master), s.output_dir, s.templates_dir,
                         research, claude_patcher(client, s.model, master))
+    assistant = _assistant(s, t, client, profile, master)
     counts = run_apply(t, profile, answers, master, s.browser_profile_dir, drafter, preparer=preparer,
-                       echo=typer.echo, limit=limit)
+                       echo=typer.echo, limit=limit, outreach=assistant.offer)
     _save_costs(s)
     if counts.get("out_of_credits"):
         typer.secho(f"\nStopped early: {CREDITS_HELP}", fg="red", bold=True)
     typer.echo(f"\nDone: {counts['applied']} applied, {counts['skipped']} skipped, {counts['later']} left for later. "
                f"Tracker: {s.tracker_path}")
+
+
+def _assistant(s, t: Tracker, client, profile, master):
+    """The outreach assistant: finds people, drafts messages (Gmail Drafts or clipboard). Never sends."""
+    import subprocess
+
+    from .apply.runner import copy_to_clipboard
+    from .outreach.assistant import Assistant
+    from .outreach.draft import OutreachWriter, claude_call
+    from .outreach.find import claude_finder
+    from .search import gmail
+
+    def open_url(url: str) -> None:  # your own everyday Chrome, never the automated browser
+        subprocess.run(["open", "-a", "Google Chrome", url])
+
+    token = s.data_dir / "gmail_token.json"
+    return Assistant(t, OutreachWriter(claude_call(client, s.model), master, profile),
+                     claude_finder(client, s.model, master, s.data_dir / "people"), profile, master,
+                     drafts=(lambda: gmail.drafts_service(token)) if gmail.can_draft(token) else None,
+                     hunter_key=s.hunter_api_key, ask=input, echo=typer.echo, open_url=open_url,
+                     copy=copy_to_clipboard)
+
+
+def _outreach_daily(s, t: Tracker):
+    """Sent/replied check, follow-up drafts that are due, and the weekly funnel. Never sends."""
+    from .llm import make_client
+    from .outreach.assistant import daily
+    from .outreach.draft import OutreachWriter, claude_call
+    from .search import gmail
+
+    token = s.data_dir / "gmail_token.json"
+    read_svc = drafts_svc = writer = None
+    profile = None
+    try:
+        read_svc = gmail.service(token)
+        drafts_svc = gmail.drafts_service(token) if gmail.can_draft(token) else None
+    except Exception as e:  # noqa: BLE001 - follow-ups are still listed from what's known
+        typer.secho(f"Outreach: Gmail not checked ({e})", fg="yellow")
+    if s.anthropic_api_key and t.contacts:
+        profile, master = load_profile(s.profile_path), load_master_resume(s.master_resume_path)
+        writer = OutreachWriter(claude_call(make_client(s.anthropic_api_key), s.model), master, profile)
+    return daily(t, read_svc=read_svc, drafts_svc=drafts_svc, writer=writer, profile=profile)
+
+
+@app.command()
+def outreach(
+    job: str = typer.Option(None, help="Find people for one applied job (its ID, or part of the company name)"),
+    mark: str = typer.Option(None, help="A contact's ID (from the Contacts sheet) to update with --to"),
+    to: str = typer.Option(None, help="New status: sent, replied, call, referral, no_reply"),
+) -> None:
+    """Outreach: your contacts, follow-ups due and this week's funnel. Drafts only; you always click Send."""
+    from .outreach.assistant import summary_lines
+    from .outreach.contacts import set_status
+
+    s = load_settings()
+    _setup_logging(s.logs_dir)
+    t = _tracker()
+    if mark:
+        c = t.contacts.get(mark)
+        if c is None or not to:
+            typer.secho("Give a contact ID from the Contacts sheet and --to <status>.", fg="red")
+            raise typer.Exit(1)
+        set_status(c, to)
+        t.save()
+        typer.echo(f"{c['name']} ({c['company']}): {c['status']}")
+        return
+    if job:
+        from .llm import make_client
+
+        applied = [r for r in t.jobs.values() if r.get("status") in ("applied", "interview")
+                   and (r["id"] == job or job.lower() in (r.get("company") or "").lower())]
+        if not applied:
+            typer.secho("No applied job matches that.", fg="red")
+            raise typer.Exit(1)
+        profile, master = load_profile(s.profile_path), load_master_resume(s.master_resume_path)
+        assistant = _assistant(s, t, make_client(s.anthropic_api_key), profile, master)
+        for r in applied[:3]:
+            typer.secho(f"\n{r['company']} - {r['title']} (applied {r.get('applied_date')})", bold=True)
+            assistant.run_for_job(r)
+            t.save()
+        _save_costs(s)
+        return
+    report = _outreach_daily(s, t)
+    t.save()
+    _save_costs(s)
+    for line in summary_lines(report):
+        typer.echo(line)
+    for c in sorted(t.contacts.values(), key=lambda c: c.get("created") or ""):
+        typer.echo(f"  {c['id']}  {c['status']:9} {c['company'][:22]:22} {c['name'][:24]:24} {c['channel']:8} "
+                   f"{c.get('email') or ''}")
 
 
 @app.command()
@@ -505,6 +603,14 @@ def prepare() -> str:
         raise typer.Exit(1)
     typer.secho("\n== 1. inbox: replies from employers ==", bold=True)
     inbox_report = inbox(days=30)
+    typer.secho("\n== outreach: sends, replies, follow-ups due ==", bold=True)
+    try:
+        t = _tracker()
+        outreach_report = _outreach_daily(s, t)
+        t.save()
+    except Exception as e:  # noqa: BLE001 - outreach never stops the daily run
+        typer.secho(f"Outreach skipped: {e}", fg="yellow")
+        outreach_report = None
     typer.secho("\n== 2. search: new jobs from every source ==", bold=True)
     search_report = search()
     typer.secho("\n== 3. score: your funnel, full postings, top picks ==", bold=True)
@@ -512,7 +618,7 @@ def prepare() -> str:
     costs = _save_costs(s)
     # Resumes and cover letters are written at apply time, only for the jobs you choose.
     text = build_summary(_tracker(), search_report, funnel_report, None, inbox_report,
-                         max_age_days=s.max_age_days, costs=costs)
+                         max_age_days=s.max_age_days, costs=costs, outreach=outreach_report)
     if METER.out_of_credits:
         text = ("> **Claude credits ran out during this run.** Some jobs weren't scored or traced and today's "
                 f"shortlist may be short. {CREDITS_HELP}\n\n" + text)
