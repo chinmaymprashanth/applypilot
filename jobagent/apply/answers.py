@@ -20,6 +20,9 @@ NEVER = re.compile(
     r"terms|privacy|consent|signature",
     re.I,
 )
+# "Why Acme", "What excites you about this role": drafted from the posting and company research.
+MOTIVATION = re.compile(r"^why\b|what (excites|interests|draws|attracts|motivates)|interest(ed)? in (this|our|the|joining)"
+                        r"|\bmotivat|why (do|would) you want|why are you (applying|interested)|fit for (this|the) role", re.I)
 FOLLOW_UP = re.compile(r"^(\(optional\)\s*)?(if (yes|no|so|not|other|applicable)\b|if (you )?(selected|answered|chose|checked)"
                        r"|if [\"'“])", re.I)
 # Voluntary self-identification, from answers.yaml's eeo section. Order matters ("transgender" before "gender").
@@ -136,6 +139,6 @@ def answer_for(label: str, kind: str, profile: Profile, answers: dict, master: M
         return Answer("cover_letter_text", "cover_letter")
     if kind == "textarea" and re.search(r"additional information|anything else", l):
         return Answer("cover_letter_text", "cover_letter")
-    if kind in ("textarea", "text") and (kind == "textarea" or "?" in l or len(l) > 40):
+    if kind in ("textarea", "text") and (kind == "textarea" or "?" in l or len(l) > 40 or MOTIVATION.search(l)):
         return Answer("free_text", None, "open question")
     return Answer("unknown", None, "couldn't tell what this asks; left for you")

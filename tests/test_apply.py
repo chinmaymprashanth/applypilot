@@ -559,3 +559,41 @@ def test_lever_name_star_location_suggestions_and_wrapped_labels(page, tmp_path)
 def test_preferred_first_and_last_name_is_the_full_name():
     assert A("What is your preferred first name and last name?").value == "Alex Jordan Rivera"
     assert A("Preferred First Name").value == "Alex"
+
+
+@pytest.mark.parametrize("label", ["Why Acme", "What excites you about this role", "Why do you want to join us?",
+                                   "Tell us why you're interested in this position and our mission."])
+def test_motivation_questions_are_drafted(label):
+    assert A(label, "text").key == "free_text"
+    assert A(label, "textarea").key == "free_text"
+
+
+def test_why_us_drafts_get_the_posting_research_and_letter(page, tmp_path, monkeypatch):
+    import json as _json
+    from jobagent import llm
+    from jobagent.apply.runner import Draft, Drafts, claude_drafter
+    (tmp_path / "Alex_Jordan_Rivera_Cover_Letter_Acme_SWE.txt").write_text(LETTER)
+    (tmp_path / "job.json").write_text(_json.dumps({
+        "description": "Acme builds route-planning software for 3,000 delivery fleets. You'll build Python services.",
+        "company_research": ["Acme launched same-day routing for grocery chains in 2026."]}))
+    sent = {}
+
+    def fake_parse(client, *, content, **kw):
+        sent.update(_json.loads(content))
+        return Drafts(answers=[
+            Draft(number=1, answer="Acme's routing for 3,000 delivery fleets is the kind of system I want to build; "
+                                   "at IBM I built Python services end to end."),
+            Draft(number=2, answer="I have 9 years of Kubernetes experience."),  # not in the record: dropped
+        ])
+
+    monkeypatch.setattr(llm, "parse", fake_parse)
+    page.set_content("""<label for=w>Why do you want to work at Acme?</label><textarea id=w></textarea>
+      <label for=k>Describe your container experience.</label><textarea id=k></textarea>""")
+    r = fill_form(page, {"company": "Acme", "title": "SWE"}, tmp_path, PROFILE, ANSWERS, MASTER,
+                  claude_drafter(None, "m", MASTER, PROFILE), delay=False)
+    assert "3,000 delivery fleets" in sent["job_description"]
+    assert sent["company_facts"] == ["Acme launched same-day routing for grocery chains in 2026."]
+    assert sent["cover_letter"] == LETTER
+    assert page.locator("#w").input_value().startswith("Acme's routing")  # company number allowed: it's in the posting
+    assert page.locator("#k").input_value() == ""  # an invented skill never reaches the form
+    assert r.drafted == ["Why do you want to work at Acme?"]
