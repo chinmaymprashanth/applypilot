@@ -35,7 +35,13 @@ inbox → search → free checks → Haiku screen → Sonnet review → full pos
 4. **Apply.** A label-based form filler for Greenhouse, Lever and Ashby (and generic forms). A guard injected
    into the page blocks every form submission while it fills. Sites with CAPTCHAs or sign-ups open in the
    user's own Chrome with an answer sheet instead; ApplyPilot never tries to get past bot checks.
-5. **Track and learn.** SQLite records with an Excel view; employer replies are read from Gmail (read-only)
+5. **Outreach.** After you mark a job applied, ApplyPilot offers two people to contact (a likely hiring manager
+   and an engineer or alum) found on public, non-LinkedIn pages: the posting, the company's team pages,
+   engineering blog bylines and GitHub. Claude drafts each message from your record (same fact check as
+   everything else). Emails go to Gmail Drafts; LinkedIn notes go to your clipboard while a LinkedIn search opens
+   in your own Chrome. ApplyPilot never sends anything and never automates LinkedIn. The daily summary lists
+   follow-ups due (day 5-7, an optional second at day 14, then stop), drafts them, and shows the weekly funnel.
+6. **Track and learn.** SQLite records with an Excel view; employer replies are read from Gmail (read-only)
    and update each application's status; `insights` shows which kinds of applications lead to interviews.
 
 ## Engineering notes
@@ -57,7 +63,7 @@ uv run playwright install chromium
 cp .env.example .env                      # add your ANTHROPIC_API_KEY
 mkdir -p data && cp examples/*.yaml data/  # then replace with your own details
 uv run python -m jobagent check
-uv run python -m jobagent gmail-login     # optional: job alerts and employer replies (Gmail, read-only)
+uv run python -m jobagent gmail-login     # optional: job alerts, employer replies, outreach drafts (never sends)
 ```
 
 Gmail access needs a Google Cloud project with the Gmail API enabled and an OAuth "Desktop app" client saved as
@@ -71,7 +77,16 @@ uv run python -m jobagent apply     # choose from the shortlists; chosen jobs ge
 ```
 
 While applying: `y` submitted, `s` skip, `r` later, `f` fill the next page of a multi-page form, `o` open the
-job in your own Chrome.
+job in your own Chrome. After `y`, ApplyPilot offers to find two people to contact and draft the messages.
+
+```bash
+uv run python -m jobagent outreach                       # contacts, follow-ups due, this week's funnel
+uv run python -m jobagent outreach --job "Acme"          # find people for a job you applied to earlier
+uv run python -m jobagent outreach --mark <id> --to call # after a LinkedIn reply, a call or a referral
+```
+
+Outreach drafts need Gmail's "manage drafts" permission: run `gmail-login` again and tick both boxes (without it,
+drafts go to your clipboard). Optional `HUNTER_API_KEY` in `.env`: one email check per keypress (free plan).
 
 Other commands: `schedule --at 07:30` (daily prepare via macOS launchd), `inbox`, `insights`, `eval-label`,
 `eval`, `status <id> <status>`, `rerender`, `tailor`, `check`. Run any with `--help`.

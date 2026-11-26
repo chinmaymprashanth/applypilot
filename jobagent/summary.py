@@ -31,7 +31,8 @@ STAGES = {"age": "older than 7 days", "1 us": "not in the US", "2 tech": "not a 
 
 
 def build_summary(tracker: Tracker, search=None, funnel=None, tailored=None, inbox=None,
-                  today: date | None = None, max_age_days: int = 7, costs: dict[str, float] | None = None) -> str:
+                  today: date | None = None, max_age_days: int = 7, costs: dict[str, float] | None = None,
+                  outreach=None) -> str:
     today = today or date.today()
     out = [f"# jobagent daily summary, {today.isoformat()}", ""]
 
@@ -39,6 +40,11 @@ def build_summary(tracker: Tracker, search=None, funnel=None, tailored=None, inb
         out += ["## 1. Replies from employers", f"Checked {inbox.checked} new hiring emails; "
                 f"{inbox.read} were about your applications."]
         out += [f"- {u}" for u in inbox.updates] + [f"- **TO DO:** {a}" for a in inbox.actions] + [""]
+
+    if outreach is not None:
+        from .outreach.assistant import summary_lines
+
+        out += summary_lines(outreach)
 
     if search is not None:
         out += ["## 2. Jobs found today",

@@ -232,6 +232,32 @@ def read_db(path: Path) -> tuple[dict[str, dict], dict[str, dict]]:
     return jobs, boards
 
 
+def _meta(path: Path, key: str) -> str | None:
+    with closing(sqlite3.connect(path)) as con:
+        try:
+            row = con.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        except sqlite3.OperationalError:
+            return None
+    return row[0] if row else None
+
+
+def read_contacts(path: Path) -> dict[str, dict]:
+    """Outreach contacts by id ({} for a database from before outreach existed)."""
+    with closing(sqlite3.connect(path)) as con:
+        try:
+            return {cid: json.loads(d) for cid, d in con.execute("SELECT id, data FROM contacts")}
+        except sqlite3.OperationalError:
+            return {}
+
+
+def write_contacts(path: Path, contacts: dict[str, dict]) -> None:
+    with closing(sqlite3.connect(path)) as con, con:
+        con.execute("CREATE TABLE IF NOT EXISTS contacts (id TEXT PRIMARY KEY, data TEXT NOT NULL)")
+        con.execute("DELETE FROM contacts")
+        con.executemany("INSERT INTO contacts VALUES (?, ?)",
+                        [(cid, json.dumps(c, default=str, ensure_ascii=False)) for cid, c in contacts.items()])
+
+
 def write_db(path: Path, jobs: dict[str, dict], boards: dict[str, dict]) -> None:
     with closing(sqlite3.connect(path)) as con, con:
         con.execute("DELETE FROM jobs")
@@ -274,6 +300,8 @@ def pull_merging(store: Store, data_dir: Path, base_version_id: str) -> MergeRep
     """Download the cloud's copy without losing what changed here since the shared starting point."""
     db = data_dir / "jobagent.db"
     yours_jobs, yours_boards = read_db(db)
+    yours_contacts = read_contacts(db)
+    exported = _meta(db, "excel_exported")
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
         archive = store.download_version(base_version_id, tmp / "base.tar.gz")
@@ -281,19 +309,29 @@ def pull_merging(store: Store, data_dir: Path, base_version_id: str) -> MergeRep
             tar.extractall(tmp / "base", members=[m for m in tar.getmembers() if m.name == "jobagent.db"],
                            filter="data")
         base_jobs, base_boards = read_db(tmp / "base" / "jobagent.db")
+        base_contacts = read_contacts(tmp / "base" / "jobagent.db")
     changed_ids = [jid for jid, r in yours_jobs.items() if r != base_jobs.get(jid)]
     details = {jid: (data_dir / "jobs" / f"{jid}.json").read_bytes() for jid in changed_ids
                if (data_dir / "jobs" / f"{jid}.json").exists()}
     store.pull(data_dir)
     theirs_jobs, theirs_boards = read_db(db)
+    theirs_contacts = read_contacts(db)
     label = lambda key, r: f"{(r.get('company') or '').strip()} - {r.get('title')}"  # noqa: E731
     jobs, changed, conflicts = three_way(base_jobs, yours_jobs, theirs_jobs, label)
     boards, _, board_conflicts = three_way(base_boards, yours_boards, theirs_boards,
                                            lambda key, b: f"board {key}")
+    contacts, _, contact_conflicts = three_way(base_contacts, yours_contacts, theirs_contacts,
+                                               lambda key, c: f"contact {c.get('name')} ({c.get('company')})")
     write_db(db, jobs, boards)
+    write_contacts(db, contacts)
+    if exported is not None:
+        # tracker.xlsx here was exported by this machine: keep its timestamp, or the downloaded one would make
+        # this (older) sheet look like fresh edits and undo the cloud's changes when it's next read.
+        with closing(sqlite3.connect(db)) as con, con:
+            con.execute("INSERT OR REPLACE INTO meta VALUES ('excel_exported', ?)", (exported,))
     for jid, content in details.items():   # posting files of jobs you changed (e.g. the resume folder link)
         (data_dir / "jobs" / f"{jid}.json").write_bytes(content)
-    return MergeReport(yours=len(changed), conflicts=conflicts + board_conflicts)
+    return MergeReport(yours=len(changed), conflicts=conflicts + board_conflicts + contact_conflicts)
 
 
 def backup_local(data_dir: Path) -> Path:

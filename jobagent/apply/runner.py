@@ -374,9 +374,11 @@ def choose_jobs(tracker: Tracker, jobs: list[dict], ask: Callable[[str], str], e
 
 def run_apply(tracker: Tracker, profile: Profile, answers: dict, master: MasterResume, browser_profile: Path,
               drafter: Drafter | None, *, preparer=None, ask: Callable[[str], str] = input,
-              echo: Callable[[str], None] = print, limit: int | None = None) -> dict[str, int]:
+              echo: Callable[[str], None] = print, limit: int | None = None,
+              outreach: Callable[[dict], None] | None = None) -> dict[str, int]:
     """Choose from the shortlist, tailor only what you chose (in the background), then fill each form.
-    Jobs already prepared or left for later are included without asking again."""
+    Jobs already prepared or left for later are included without asking again.
+    outreach(job) runs after you mark a job applied: it offers two people to contact and drafts (never sends)."""
     from playwright.sync_api import sync_playwright
 
     from ..tailor.render import Renderer
@@ -485,6 +487,9 @@ def run_apply(tracker: Tracker, profile: Profile, answers: dict, master: MasterR
             if choice == "y":
                 tracker.set_status(job["id"], "applied")
                 counts["applied"] += 1
+                if outreach is not None:
+                    save_tracker(tracker, ask)  # the application is saved before outreach starts
+                    outreach(tracker.jobs[job["id"]])
             elif choice == "s":
                 tracker.update(job["id"], status="skipped", filtered_reason="skipped by you at apply time")
                 counts["skipped"] += 1

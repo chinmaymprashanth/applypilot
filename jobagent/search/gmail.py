@@ -25,6 +25,10 @@ from .common import html_to_text, is_us, looks_tech, make_job, work_mode
 log = logging.getLogger(__name__)
 
 SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
+# Drafts for outreach messages (jobagent/outreach). This scope could also send, but jobagent only ever calls
+# drafts().create: you open each draft in Gmail and click Send yourself.
+COMPOSE = "https://www.googleapis.com/auth/gmail.compose"
+LOGIN_SCOPES = [*SCOPES, COMPOSE]
 
 # Gmail's from: matches part of the address, so a bare domain covers every sender there.
 SENDERS = {
@@ -54,7 +58,7 @@ def login(credentials_path: Path, token_path: Path):
 
     if not credentials_path.exists():
         raise GmailAuthError(f"{credentials_path} not found. Download it from Google Cloud (see README).")
-    flow = InstalledAppFlow.from_client_secrets_file(str(credentials_path), SCOPES)
+    flow = InstalledAppFlow.from_client_secrets_file(str(credentials_path), LOGIN_SCOPES)
     creds = flow.run_local_server(port=0)
     token_path.write_text(creds.to_json())
     return creds
@@ -74,6 +78,36 @@ def service(token_path: Path):
             creds.refresh(Request())
         except RefreshError as e:
             # Google expires tokens for apps in "Testing" mode after 7 days.
+            raise GmailAuthError("Gmail sign-in expired. Run: python -m jobagent gmail-login") from e
+        token_path.write_text(creds.to_json())
+    return build("gmail", "v1", credentials=creds, cache_discovery=False)
+
+
+def can_draft(token_path: Path) -> bool:
+    """Whether your Gmail sign-in allows saving drafts (sign-ins from before outreach only allow reading)."""
+    if not token_path.exists():
+        return False
+    try:
+        return COMPOSE in (json.loads(token_path.read_text()).get("scopes") or [])
+    except (OSError, ValueError):
+        return False
+
+
+def drafts_service(token_path: Path):
+    """Gmail with permission to save drafts. jobagent never sends: you click Send in Gmail."""
+    from google.auth.exceptions import RefreshError
+    from google.auth.transport.requests import Request
+    from google.oauth2.credentials import Credentials
+    from googleapiclient.discovery import build
+
+    if not can_draft(token_path):
+        raise GmailAuthError("Gmail drafts aren't allowed yet. Run: python -m jobagent gmail-login "
+                             "(and tick both boxes: read and manage drafts)")
+    creds = Credentials.from_authorized_user_file(str(token_path), LOGIN_SCOPES)
+    if not creds.valid:
+        try:
+            creds.refresh(Request())
+        except RefreshError as e:
             raise GmailAuthError("Gmail sign-in expired. Run: python -m jobagent gmail-login") from e
         token_path.write_text(creds.to_json())
     return build("gmail", "v1", credentials=creds, cache_discovery=False)
