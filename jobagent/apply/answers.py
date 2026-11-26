@@ -20,11 +20,18 @@ NEVER = re.compile(
     r"terms|privacy|consent|signature",
     re.I,
 )
+# "Why Acme", "What excites you about this role": drafted from the posting and company research.
+MOTIVATION = re.compile(r"^why\b|what (excites|interests|draws|attracts|motivates)|interest(ed)? in (this|our|the|joining)"
+                        r"|\bmotivat|why (do|would) you want|why are you (applying|interested)|fit for (this|the) role", re.I)
+FOLLOW_UP = re.compile(r"^(\(optional\)\s*)?(if (yes|no|so|not|other|applicable)\b|if (you )?(selected|answered|chose|checked)"
+                       r"|if [\"'“])", re.I)
 # Voluntary self-identification, from answers.yaml's eeo section. Order matters ("transgender" before "gender").
 EEO_RULES = [
     (r"transgender", "transgender"), (r"sexual orientation", "sexual_orientation"), (r"gender|\bsex\b", "gender"),
     (r"hispanic|latin[oa]", "hispanic"), (r"\brace\b|racial|ethnic", "race"), (r"veteran", "veteran"),
-    (r"armed forces|military", "military"), (r"disabilit", "disability"),
+    # Only questions about your own service: "Can you support our military customers?" is not one.
+    (r"(served|serving|service member|member of|veteran).{0,40}(armed forces|military)|(armed forces|military) "
+     r"(service|status|spouse)|transitioning service member", "military"), (r"disabilit", "disability"),
 ]
 
 
@@ -43,7 +50,7 @@ def answer_for(label: str, kind: str, profile: Profile, answers: dict, master: M
                company: str, options: list[str] | None = None) -> Answer:
     """kind: text, textarea, select, combobox, radio, yesno, checkbox or file."""
     # "* First name (Optional)" -> "first name": required-field stars and "(optional)" don't change the question.
-    l = " ".join(re.sub(r"\(optional\)", " ", label.lower()).split()).lstrip("*• ").strip()
+    l = " ".join(re.sub(r"\(optional\)|✱", " ", label.lower()).split()).lstrip("*• ").strip()
     first, _, last = profile.name.partition(" ")
     last = profile.name.split()[-1]
     a = lambda k: (answers.get(k) or None)  # noqa: E731 - blank in answers.yaml means "leave it"
@@ -51,6 +58,9 @@ def answer_for(label: str, kind: str, profile: Profile, answers: dict, master: M
     choice = kind in ("select", "combobox", "radio", "yesno", "checkbox", "dropdown")
     if OPTIONAL_CONTACT.search(" ".join([l, *(options or [])])):
         return Answer("optional_contact", a("optional_contact"), "declining optional texts/marketing")
+    # "If yes, what type of sponsorship?": a follow-up box to an earlier choice, not a question of its own.
+    if FOLLOW_UP.search(l):
+        return Answer("follow_up", None, "follow-up to an earlier answer; left for you")
     eeo = answers.get("eeo") or {}
     for pattern, key in EEO_RULES:
         if re.search(pattern, l):
@@ -79,8 +89,9 @@ def answer_for(label: str, kind: str, profile: Profile, answers: dict, master: M
     rules: list[tuple[str, str, str | None]] = [
         (r"^first name|given name|^first\b", "first_name", first),
         (r"^last name|family name|surname|^last\b", "last_name", last),
+        (r"preferred (first )?name and last name|preferred full name", "preferred_name", profile.name),
         (r"preferred (first )?name", "preferred_name", first),
-        (r"^(full )?name\*?$|^legal name|^your name", "full_name", profile.name),
+        (r"^(full )?name\*?$|^legal name|^your name|full legal name|legal full name", "full_name", profile.name),
         (r"e-?mail", "email", profile.email),
         (r"phone device type|phone type|type of phone", "phone_type", "Mobile"),
         (r"phone|mobile", "phone", profile.phone),
@@ -128,6 +139,6 @@ def answer_for(label: str, kind: str, profile: Profile, answers: dict, master: M
         return Answer("cover_letter_text", "cover_letter")
     if kind == "textarea" and re.search(r"additional information|anything else", l):
         return Answer("cover_letter_text", "cover_letter")
-    if kind in ("textarea", "text") and (kind == "textarea" or "?" in l or len(l) > 40):
+    if kind in ("textarea", "text") and (kind == "textarea" or "?" in l or len(l) > 40 or MOTIVATION.search(l)):
         return Answer("free_text", None, "open question")
     return Answer("unknown", None, "couldn't tell what this asks; left for you")

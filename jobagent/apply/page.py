@@ -36,14 +36,23 @@ COLLECT = """() => {
   const txt = el => (el && el.innerText || '').replace(/\\s+/g, ' ').trim();
   let n = 0; const tag = el => { if (!el.dataset.ja) el.dataset.ja = 'ja' + (n++) + '_' + Math.random().toString(36).slice(2, 6); return el.dataset.ja; };
   const ownLabel = el => {
-    if (el.labels && el.labels.length) return txt(el.labels[0]);
+    if (el.labels && el.labels.length) {
+      const l = el.labels[0];
+      if (!l.contains(el)) return txt(l);
+      // A label wrapped around its field (Lever) also holds the field's options; keep only the question.
+      const c = l.cloneNode(true);
+      c.querySelectorAll('select, input, textarea, button, [class*=dropdown], [class*=field]').forEach(x => x.remove());
+      return (c.textContent || '').replace(/\\s+/g, ' ').trim();
+    }
     if (el.getAttribute('aria-label')) return el.getAttribute('aria-label');
     const by = el.getAttribute('aria-labelledby');
     if (by) return by.split(' ').map(i => txt(document.getElementById(i))).join(' ');
     return '';
   };
-  // The question text for a field or group of options: the group's own accessible label if it has one,
-  // else the nearest label/legend that comes BEFORE it (a question's text never follows its answers).
+  // The question text for a field or group of options: walking up from the field, the nearest of
+  // (a) a container's own accessible label (aria-labelledby) or (b) a label/legend that comes BEFORE the field
+  // (a question's text never follows its answers). Nearest wins, so a whole form's aria-labelledby
+  // ("Application" on Ashby) never hides each question's own title.
   const before = (c, el) => !!(c.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING);
   const question = (el, skip) => {
     let a = el.parentElement;
@@ -53,14 +62,17 @@ COLLECT = """() => {
         const t = by.split(' ').map(id => txt(document.getElementById(id))).join(' ').trim();
         if (t && !skip.includes(t)) return t;
       }
-    }
-    a = el.parentElement;
-    for (let i = 0; a && i < 7; i++, a = a.parentElement) {
       const found = [...a.querySelectorAll('legend, label, [class*=label], [class*=question], h3, h4')]
         .filter(c => { const t = txt(c); return t && !skip.includes(t) && t.length < 400 && !c.contains(el) && before(c, el); });
       if (found.length) return txt(found[found.length - 1]);
     }
     return '';
+  };
+  // Hidden "honeypot" fields catch bots: a person can't see or tab to them, so filling one flags the application.
+  const trap = el => {
+    const r = el.getBoundingClientRect();
+    return el.getAttribute('tabindex') === '-1' || !!el.closest('[aria-hidden=true]')
+      || r.right + window.scrollX < 0 || r.bottom + window.scrollY < 0;
   };
   const out = [];
   const required = el => !!(el.required || el.getAttribute('aria-required') === 'true');
@@ -68,13 +80,18 @@ COLLECT = """() => {
     const type = (el.type || '').toLowerCase();
     if (['hidden', 'submit', 'button', 'image', 'reset', 'radio', 'checkbox', 'search'].includes(type)) continue;
     if (type !== 'file' && (!vis(el) || el.disabled || el.readOnly)) continue;
-    let label = ownLabel(el) || el.getAttribute('placeholder') || '';
+    if (type !== 'file' && el.tagName !== 'SELECT' && trap(el)) continue;
+    // Own label first; else the question above it (Lever's custom questions, Ashby's typeaheads); the
+    // placeholder ("Type your response", "Start typing...") only as a last resort.
+    let label = ownLabel(el) || (type !== 'file' && question(el, [])) || el.getAttribute('placeholder') || '';
     if (type === 'file') {
       const images = el.accept && el.accept.split(',').every(a => /image|\\.(jpe?g|png|gif)/i.test(a));
-      label = [label, question(el, []), el.id, el.name, images ? 'photo' : ''].join(' ');
+      // Ashby's "Autofill from resume" box rewrites the form when a file lands in it, so it's marked.
+      const autofill = el.closest('[class*=autofill]') ? 'autofill' : '';
+      label = [label, question(el, []), el.id, el.name, images ? 'photo' : '', autofill].join(' ');
     } else if (!label.trim()) continue;  // unlabelled helper inputs inside widgets (search boxes, hidden repeats)
     const kind = type === 'file' ? 'file' : el.tagName === 'SELECT' ? 'select' : el.tagName === 'TEXTAREA' ? 'textarea'
-      : el.getAttribute('role') === 'combobox' ? 'combobox' : 'text';
+      : el.getAttribute('role') === 'combobox' ? 'combobox' : type === 'number' ? 'number' : 'text';
     out.push({id: tag(el), kind, label: label.trim(), required: required(el),
               filled: type === 'file' ? el.files.length > 0 : kind === 'select' ? el.selectedIndex > 0
                 : !!el.value && kind !== 'combobox',
@@ -83,7 +100,11 @@ COLLECT = """() => {
   const groups = {};
   for (const el of document.querySelectorAll('input[type=radio], input[type=checkbox]')) {
     if (!vis(el) && !(el.labels && el.labels.length && vis(el.labels[0]))) continue;
-    (groups[el.type + ':' + (el.name || el.id)] = groups[el.type + ':' + (el.name || el.id)] || []).push(el);
+    if (el.closest('[class*=yesno]')) continue;  // the hidden box behind a Yes/No button pair
+    // One question's boxes belong together even when each has its own name (Ashby: one entry per question).
+    const entry = el.closest('[data-field-path]');
+    const key = el.type + ':' + (entry ? entry.getAttribute('data-field-path') : (el.name || el.id));
+    (groups[key] = groups[key] || []).push(el);
   }
   for (const [key, els] of Object.entries(groups)) {
     const opts = els.map(e => ownLabel(e) || e.value);
@@ -104,8 +125,11 @@ COLLECT = """() => {
     if (txt(yes) !== 'Yes' || !vis(yes)) continue;
     const no = [...yes.parentElement.querySelectorAll('button')].find(b => txt(b) === 'No');
     if (!no) continue;
-    out.push({id: tag(yes) + ',' + tag(no), kind: 'yesno', label: question(yes, ['Yes', 'No']), required: false,
-              filled: false, options: ['Yes', 'No']});
+    const pressed = b => b.getAttribute('aria-pressed') === 'true' || /selected|active|checked/i.test(b.className);
+    const entry = yes.closest('[data-field-path]');  // Ashby marks a required question's title with a "required" class
+    out.push({id: tag(yes) + ',' + tag(no), kind: 'yesno', label: question(yes, ['Yes', 'No']),
+              required: !!(entry && entry.querySelector('[class*=required]')),
+              filled: pressed(yes) || pressed(no), options: ['Yes', 'No']});
   }
   return out;
 }"""
@@ -160,23 +184,78 @@ def fill(page, q: Question, value: str) -> bool:
     return _fill(page, q, choices[0] if " | " in value else value)
 
 
+def close_popups(page) -> None:
+    """Close a dropdown list left open by the previous field; an open list covers the fields below it."""
+    try:
+        if page.locator("[role=option]:visible, [role=listbox]:visible").count():
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(150)
+    except Exception:  # noqa: BLE001 - nothing to close
+        pass
+
+
+def leave(loc) -> None:
+    """Move focus out of a field. React forms (Ashby) only keep a typed value once the field loses focus."""
+    try:
+        loc.blur()
+    except Exception:  # noqa: BLE001 - the field went away; the check after filling catches it
+        pass
+
+
+# Suggestion lists under a text box: ARIA options, Lever's location results, Google Places.
+SUGGESTIONS = "[role=option]:visible, .dropdown-results > .dropdown-location:visible, .pac-item:visible"
+
+
+def suggests(loc) -> bool:
+    """A text box that offers suggestions to pick from, and may clear what was typed unless one is picked."""
+    return loc.evaluate("""el => !!el.getAttribute('aria-autocomplete')
+      || /location|autocomplete|places/i.test([el.className, el.id, el.name].join(' '))""")
+
+
+def pick_suggestion(page, loc, value: str) -> bool:
+    """After typing, click the suggestion that matches (e.g. "Los Angeles, CA" -> "Los Angeles, CA, USA")."""
+    options = page.locator(SUGGESTIONS)
+    try:
+        options.first.wait_for(state="visible", timeout=3000)
+    except Exception:  # noqa: BLE001 - nothing suggested: keep what was typed
+        leave(loc)
+        return same_text(loc.input_value(), value)
+    texts = options.all_inner_texts()
+    i = best_option(texts, value)
+    if i is None:
+        i = best_option(texts, value.split(",")[0])
+    if i is None:
+        page.keyboard.press("Escape")
+        leave(loc)
+        return False
+    options.nth(i).click()
+    leave(loc)
+    return bool(loc.input_value().strip())
+
+
 def _fill(page, q: Question, value: str) -> bool:
     ids = q.id.split(",")
     loc = page.locator(f'[data-ja="{ids[0]}"]')
     if q.kind == "file":
         loc.set_input_files(value)
         return True
-    if q.kind in ("text", "textarea"):
+    close_popups(page)
+    if q.kind == "number" and not re.fullmatch(r"\s*\d+(\.\d+)?\s*", value):
+        return False  # a number box only takes a number ("Yes" would be rejected); left for the user
+    if q.kind in ("text", "textarea", "number"):
         loc.click()
         loc.fill("")
         if len(value) > 120:
             loc.fill(value)
         else:
             loc.press_sequentially(value, delay=random.randint(15, 45))
+        if q.kind == "text" and suggests(loc):
+            return pick_suggestion(page, loc, value)
         if not same_text(loc.input_value(), value):
             # Typing can be lost while a page is still settling (the first field especially); set it directly.
             page.wait_for_timeout(500)
             loc.fill(value)
+        leave(loc)
         return same_text(loc.input_value(), value)
     if q.kind == "select":
         i = best_option(q.options, value)
@@ -191,7 +270,10 @@ def _fill(page, q: Question, value: str) -> bool:
         target = page.locator(f'[data-ja="{ids[i]}"]')
         if q.kind == "yesno":
             target.click()
-            return True
+            page.wait_for_timeout(150)
+            # Ashby shows the choice with aria-pressed; buttons without it can't be checked, so the click counts.
+            pressed = target.get_attribute("aria-pressed")
+            return pressed is None or pressed == "true"
         try:
             target.check(force=True)
         except Exception:  # noqa: BLE001 - custom-styled radios hide the real input
@@ -234,10 +316,33 @@ def _fill(page, q: Question, value: str) -> bool:
         if i is None:
             page.keyboard.press("Escape")
             loc.fill("")
+            leave(loc)
             return False
         options.nth(i).click()
+        leave(loc)
         return True
     return False
+
+
+def settle(page, quiet_ms: int = 800, limit_ms: int = 8000) -> None:
+    """Wait until the page stops changing: after a resume upload some sites parse it and rebuild the form."""
+    try:
+        page.wait_for_load_state("networkidle", timeout=limit_ms)
+    except Exception:  # noqa: BLE001 - pages that keep a connection open still get the quiet check
+        pass
+    page.evaluate("""([quiet, limit]) => new Promise(done => {
+      const finish = () => { obs.disconnect(); done(); };
+      let t = setTimeout(finish, quiet);
+      const obs = new MutationObserver(() => { clearTimeout(t); t = setTimeout(finish, quiet); });
+      obs.observe(document.body, {subtree: true, childList: true, attributes: true, characterData: true});
+      setTimeout(finish, limit);
+    })""", [quiet_ms, limit_ms])
+
+
+def value_of(page, q: Question) -> str | None:
+    """What a typed field holds now, or None if the field is gone."""
+    loc = page.locator(f'[data-ja="{q.id.split(",")[0]}"]')
+    return loc.input_value() if loc.count() else None
 
 
 def country_code(page, q: Question) -> str | None:
@@ -290,7 +395,7 @@ def pick_us_country_code(page, q: Question) -> bool:
 def same_text(actual: str, wanted: str) -> bool:
     """Forms reformat what you type ("+1 (555) 010-0123" -> "(555) 010-0123"); compare letters and digits."""
     a, w = (re.sub(r"\W", "", x.lower()) for x in (actual, wanted))
-    return bool(a) and (a == w or (len(w) >= 10 and w[-10:] in a))
+    return bool(a) and (a == w or (len(w) >= 10 and w[-10:] in a) or (len(w) >= 6 and a.startswith(w)))
 
 
 def mark(page, q: Question, color: str) -> None:

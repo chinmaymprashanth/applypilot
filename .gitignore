@@ -1,5 +1,6 @@
 .env
 browser_profile/
+browser_profile_chrome/
 data/
 output/
 logs/
