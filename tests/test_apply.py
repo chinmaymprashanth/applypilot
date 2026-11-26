@@ -389,3 +389,173 @@ def test_workday_style_dropdowns_and_address(page, tmp_path):
 def test_workday_opens_in_jobagents_browser_for_sign_in():
     from jobagent.apply.runner import OWN_BROWSER, SIGN_IN_FIRST
     assert "workday" not in OWN_BROWSER and "workday" in SIGN_IN_FIRST
+
+
+# ---- Ashby and Lever, built from their real markup (November 2026) ---------------------------------------------
+
+# Ashby: the whole form is aria-labelledby "Application"; each question is a field entry with its own title.
+# Yes/No are button pairs with aria-pressed; React keeps a typed value only once the field loses focus; dropping a
+# file in "Autofill from resume" (or the resume field) makes Ashby parse it and rebuild the form.
+ASHBY = """<!doctype html><html><body><h2 id="app-title">Application</h2>
+<div id="form" aria-labelledby="app-title">
+  <div class="ashby-application-form-autofill-input-root"><input type="file" id="autofill"></div>
+  <div id="fields"></div>
+  <div class="ashby-application-form-field-entry" data-field-path="_systemfield_resume">
+    <label class="ashby-application-form-question-title">Resume</label>
+    <input type="file" id="_systemfield_resume" onchange="rebuild()"></div>
+  <div class="ashby-application-form-field-entry" data-field-path="auth">
+    <label class="_required_x ashby-application-form-question-title" for="auth">Are you authorized to work in the United States?</label>
+    <div class="_yesno_x"><button id="y" aria-pressed="false" onclick="press(this)">Yes</button>
+      <button id="n" aria-pressed="false" onclick="press(this)">No</button><input type="checkbox" tabindex="-1" name="auth"></div></div>
+  <div class="ashby-application-form-field-entry" data-field-path="hear">
+    <label class="ashby-application-form-question-title">How did you hear about us?</label>
+    <input role="combobox" placeholder="Start typing..." id="hear" oninput="opts(this)"><div id="hear-list"></div></div>
+  <div class="ashby-application-form-field-entry" data-field-path="cities">
+    <label class="ashby-application-form-question-title">Which offices could you work from?</label>
+    <label><input type="checkbox" name="c1">Boston, MA</label><label><input type="checkbox" name="c2">Seattle, WA</label></div>
+  <div class="ashby-application-form-field-entry" data-field-path="hours">
+    <label class="ashby-application-form-question-title" for="hours">How many hours per week can you be in the office?</label>
+    <input type="number" id="hours" placeholder="Type here..."></div>
+  <input type="text" name="website" id="footer-form-website" tabindex="-1" style="position:absolute;left:-5000px">
+</div>
+<script>
+  window.parsed = 0;
+  const FIELDS = `<div class="ashby-application-form-field-entry" data-field-path="name">
+      <label for="name">Name</label><input id="name" required></div>
+    <div class="ashby-application-form-field-entry" data-field-path="email">
+      <label for="email">Email</label><input id="email" required></div>`;
+  document.getElementById('fields').innerHTML = FIELDS;
+  function rebuild() {  // the resume parser rebuilds the form 300 ms after upload, wiping what was typed
+    setTimeout(() => { window.parsed++; document.getElementById('fields').innerHTML = FIELDS; }, 300);
+  }
+  function press(b) { for (const o of b.parentElement.querySelectorAll('button')) o.setAttribute('aria-pressed', o === b); }
+  function opts(i) { document.getElementById('hear-list').innerHTML = i.value ?
+      '<div role="option" onclick="pick(this)">Company website</div><div role="option" onclick="pick(this)">LinkedIn</div>' : ''; }
+  function pick(o) { document.getElementById('hear').value = o.innerText; document.getElementById('hear-list').innerHTML = ''; }
+</script></body></html>"""
+
+
+def test_ashby_questions_files_first_yes_no_and_traps(page, tmp_path):
+    from jobagent.apply.page import collect
+    (tmp_path / "Alex_Jordan_Rivera_Resume_Acme_SWE.pdf").write_bytes(b"%PDF-1.4 resume")
+    (tmp_path / "Alex_Jordan_Rivera_Cover_Letter_Acme_SWE.txt").write_text(LETTER)
+    page.set_content(ASHBY)
+    labels = {q.label: q for q in collect(page)}
+    # Each question's own title, not the form's "Application" or the "Start typing..." placeholder.
+    assert "Are you authorized to work in the United States?" in labels
+    assert labels["Are you authorized to work in the United States?"].required
+    assert "How did you hear about us?" in labels
+    assert labels["Which offices could you work from?"].options == ["Boston, MA", "Seattle, WA"]  # one question
+    assert not any("website" in q.label.lower() for q in collect(page))  # the hidden trap field isn't a question
+
+    r = fill_form(page, {"company": "Acme", "title": "SWE"}, tmp_path, PROFILE, ANSWERS, MASTER, None, delay=False)
+
+    assert page.evaluate("window.parsed") == 1  # the resume went in, and the rebuild happened...
+    assert page.locator("#name").input_value() == "Alex Jordan Rivera"  # ...before name and email were typed
+    assert page.locator("#email").input_value() == "c@example.com"
+    assert page.evaluate("document.getElementById('autofill').files.length") == 0  # "Autofill from resume" untouched
+    assert page.locator("#y").get_attribute("aria-pressed") == "true"
+    assert page.locator("#n").get_attribute("aria-pressed") == "false"
+    assert page.locator("#hear").input_value() == "Company website"
+    assert page.locator("#hours").input_value() == ""  # "Yes" can't go in a number box: left for you
+    assert any("hours per week" in x for x in r.left)
+    assert page.locator("#footer-form-website").input_value() == ""  # never fill a honeypot
+
+
+def test_a_value_the_site_clears_is_typed_again(page, tmp_path):
+    (tmp_path / "Alex_Jordan_Rivera_Cover_Letter_Acme_SWE.txt").write_text(LETTER)
+    page.set_content("""<label for=em>Email</label><input id=em>
+      <label for=ln>Last name</label><input id=ln>
+      <script>let once = true;  // the site wipes Email once, after the next field is filled
+        document.getElementById('ln').addEventListener('input', () => {
+          if (once) { once = false; setTimeout(() => document.getElementById('em').value = '', 50); } });</script>""")
+    r = fill_form(page, {"company": "Acme", "title": "SWE"}, tmp_path, PROFILE, ANSWERS, MASTER, None, delay=False)
+    assert page.locator("#em").input_value() == "c@example.com"
+    assert not r.left
+
+
+LEVER = """<!doctype html><html><body><form>
+<ul><li class="application-question"><label><div class="application-label">Full name</div>
+  <div class="application-field"><input name="name" type="text"></div></label></li>
+<li class="application-question custom-question"><div><div class="application-label full-width textarea">
+  <div class="text">Why are you interested in Acme's robotics team?</div></div>
+  <div class="application-field full-width"><textarea class="card-field-input" name="cards[c6][field0]"
+   placeholder="Type your response"></textarea></div></div></li></ul></form></body></html>"""
+
+
+def test_lever_custom_question_is_read_from_its_card(page, tmp_path):
+    (tmp_path / "Alex_Jordan_Rivera_Cover_Letter_Acme_SWE.txt").write_text(LETTER)
+    page.set_content(LEVER)
+    asked = []
+
+    def drafter(job, questions):
+        asked.extend(questions)
+        return ["I built and shipped LLM agents end to end."]
+
+    r = fill_form(page, {"company": "Acme", "title": "SWE"}, tmp_path, PROFILE, ANSWERS, MASTER, drafter, delay=False)
+    assert asked == ["Why are you interested in Acme's robotics team?"]  # the question, not "Type your response"
+    assert page.locator("textarea").input_value().startswith("I built")
+    assert r.drafted
+
+
+def test_form_answers_are_saved_for_a_hand_off(page, tmp_path):
+    from jobagent.apply.runner import save_form_answers
+    page.set_content("""<label for=em>Email</label><input id=em value="c@example.com">
+      <label for=why>Why us?</label><textarea id=why>Because of the robots.</textarea>
+      <label for=s>Sponsorship?</label><select id=s><option></option><option selected>No</option></select>""")
+    text = save_form_answers(page, tmp_path).read_text()
+    assert "Email\nc@example.com" in text and "Why us?\nBecause of the robots." in text and "Sponsorship?\nNo" in text
+
+
+@pytest.mark.parametrize("label,key", [
+    ("If yes, what type of sponsorship?", "follow_up"),
+    ('If you selected "A protected Individual" OR "Other" to the above question, please explain', "follow_up"),
+    ("(Optional) If other, please provide further details", "follow_up"),
+    ("Please state your full legal name:", "full_name"),
+    ("Legal Full Name", "full_name"),
+    ("Have you served in the U.S. armed forces?", "eeo_military"),
+    ("Are you a transitioning service member?", "eeo_military"),
+])
+def test_follow_ups_legal_name_and_military(label, key):
+    assert A(label).key == key
+
+
+def test_supporting_military_customers_is_not_a_self_id_question():
+    q = ("Shield AI provides technology, services, and support to the United States military and allied forces. "
+         "Are there any reasons why you would not be able to fully contribute in support of the U.S. military?")
+    assert not A(q, "radio").key.startswith("eeo")
+
+
+LEVER_FIELDS = """<!doctype html><html><body><form><ul>
+<li class="application-question"><label><div class="application-label">Full name<span class="required">✱</span></div>
+  <div class="application-field"><input name="name" type="text"></div></label></li>
+<li class="application-question"><label><div class="application-label">Current location</div>
+  <div class="application-field"><input class="location-input" id="location-input" name="location" oninput="suggest(this)">
+  <div class="dropdown-results"></div></div></label></li>
+<li><label>Gender<div class="application-field"><select name="g"><option>Select ...</option><option>Male</option>
+  <option>Female</option></select></div></label></li></ul></form>
+<script>
+  function suggest(i) { const r = i.parentElement.querySelector('.dropdown-results');
+    r.innerHTML = i.value.length > 3 ? '<div class="dropdown-location" onmousedown="pick(this)">Los Angeles, CA, USA</div>'
+      + '<div class="dropdown-location" onmousedown="pick(this)">Los Ángeles, Biobío, CHL</div>' : ''; }
+  function pick(o) { const i = document.getElementById('location-input'); i.value = o.innerText; i.dataset.picked = 1;
+    o.parentElement.innerHTML = ''; }
+  // Like Lever: typed text that wasn't picked from the list is cleared when you leave the box.
+  document.getElementById('location-input').addEventListener('blur', e => { if (!e.target.dataset.picked) e.target.value = ''; });
+</script></body></html>"""
+
+
+def test_lever_name_star_location_suggestions_and_wrapped_labels(page, tmp_path):
+    from jobagent.apply.page import collect
+    (tmp_path / "Alex_Jordan_Rivera_Cover_Letter_Acme_SWE.txt").write_text(LETTER)
+    page.set_content(LEVER_FIELDS)
+    assert "Gender" in [q.label for q in collect(page)]  # not "Gender Select ... Male Female"
+    r = fill_form(page, {"company": "Acme", "title": "SWE"}, tmp_path, PROFILE, ANSWERS, MASTER, None, delay=False)
+    assert page.locator("input[name=name]").input_value() == "Alex Jordan Rivera"
+    assert page.locator("#location-input").input_value() == "Los Angeles, CA, USA"  # picked, so it stays
+    assert not r.left
+
+
+def test_preferred_first_and_last_name_is_the_full_name():
+    assert A("What is your preferred first name and last name?").value == "Alex Jordan Rivera"
+    assert A("Preferred First Name").value == "Alex"
